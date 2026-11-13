@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("email or password is invalid")
-	ErrInvalidRefresh     = errors.New("refresh session is invalid")
+	ErrInvalidCredentials        = errors.New("email or password is invalid")
+	ErrEmailVerificationRequired = errors.New("email verification is required")
+	ErrInvalidRefresh            = errors.New("refresh session is invalid")
 )
 
 type AuthenticationRepository interface {
@@ -47,12 +48,21 @@ type AuthenticationResult struct {
 }
 
 type AuthenticationService struct {
-	repository AuthenticationRepository
-	passwords  PasswordService
-	tokens     AccessTokenService
-	refreshTTL time.Duration
-	dummyHash  string
-	now        func() time.Time
+	repository          AuthenticationRepository
+	passwords           PasswordService
+	tokens              AccessTokenService
+	refreshTTL          time.Duration
+	dummyHash           string
+	now                 func() time.Time
+	pendingVerification interface {
+		Request(context.Context, string) error
+	}
+}
+
+func (s *AuthenticationService) SetPendingVerificationService(service interface {
+	Request(context.Context, string) error
+}) {
+	s.pendingVerification = service
 }
 
 func NewAuthenticationService(
@@ -87,7 +97,19 @@ func (s *AuthenticationService) Login(
 	if err != nil {
 		return AuthenticationResult{}, fmt.Errorf("find login user: %w", err)
 	}
-	if s.passwords.Verify(user.PasswordHash, command.Password) != nil || user.Status != models.UserStatusActive {
+	if s.passwords.Verify(user.PasswordHash, command.Password) != nil {
+		return AuthenticationResult{}, ErrInvalidCredentials
+	}
+	if user.Status == models.UserStatusPending {
+		if s.pendingVerification == nil {
+			return AuthenticationResult{}, errors.New("pending email verification service is not configured")
+		}
+		if err := s.pendingVerification.Request(ctx, user.ID); err != nil {
+			return AuthenticationResult{}, fmt.Errorf("request pending email verification: %w", err)
+		}
+		return AuthenticationResult{}, ErrEmailVerificationRequired
+	}
+	if user.Status != models.UserStatusActive {
 		return AuthenticationResult{}, ErrInvalidCredentials
 	}
 

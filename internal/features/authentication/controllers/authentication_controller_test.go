@@ -45,6 +45,15 @@ func TestAuthenticationControllerLoginSetsSecureRefreshCookie(t *testing.T) {
 	}
 }
 
+func TestAuthenticationControllerPendingLoginReturnsVerificationRequired(t *testing.T) {
+	service := &fakeAuthenticationControllerService{loginErr: services.ErrEmailVerificationRequired}
+	controller := NewAuthenticationController(service, testCookieConfig())
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":"merchant@example.com","password":"correct-password"}`))
+	response := httptest.NewRecorder()
+	controller.Login(response, request)
+	assertAPIError(t, response, http.StatusForbidden, "EMAIL_VERIFICATION_REQUIRED")
+}
+
 func TestAuthenticationControllerUsesGenericInvalidCredentials(t *testing.T) {
 	service := &fakeAuthenticationControllerService{loginErr: services.ErrInvalidCredentials}
 	controller := NewAuthenticationController(service, testCookieConfig())

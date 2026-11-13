@@ -61,6 +61,39 @@ func TestAuthenticationServiceLoginRejectsIncorrectUnknownAndSuspendedUsers(t *t
 	}
 }
 
+func TestAuthenticationServicePendingLoginRequestsVerification(t *testing.T) {
+	repository := newFakeAuthenticationRepository()
+	repository.credential = credentialUser(models.UserStatusPending)
+	service := newTestAuthenticationService(t, repository)
+	requester := &fakePendingVerificationRequester{}
+	service.SetPendingVerificationService(requester)
+
+	_, err := service.Login(context.Background(), LoginCommand{
+		Email: "merchant@example.com", Password: "correct-password",
+	})
+	if !errors.Is(err, ErrEmailVerificationRequired) || requester.userID != testAuthUserID {
+		t.Fatalf("error=%v requested user=%q", err, requester.userID)
+	}
+	if repository.createCalls != 0 {
+		t.Fatal("pending login created a refresh session")
+	}
+}
+
+func TestAuthenticationServicePendingLoginWithWrongPasswordDoesNotRequestVerification(t *testing.T) {
+	repository := newFakeAuthenticationRepository()
+	repository.credential = credentialUser(models.UserStatusPending)
+	service := newTestAuthenticationService(t, repository)
+	requester := &fakePendingVerificationRequester{}
+	service.SetPendingVerificationService(requester)
+
+	_, err := service.Login(context.Background(), LoginCommand{
+		Email: "merchant@example.com", Password: "wrong",
+	})
+	if !errors.Is(err, ErrInvalidCredentials) || requester.userID != "" {
+		t.Fatalf("error=%v requested user=%q", err, requester.userID)
+	}
+}
+
 func TestAuthenticationServiceRefreshRotatesAndReturnsReplacement(t *testing.T) {
 	repository := newFakeAuthenticationRepository()
 	repository.rotatedSession = models.RefreshSession{UserID: testAuthUserID}
@@ -147,6 +180,13 @@ func (*fakePasswordService) Verify(hash, password string) error {
 }
 
 type fakeAccessTokenService struct{}
+
+type fakePendingVerificationRequester struct{ userID string }
+
+func (r *fakePendingVerificationRequester) Request(_ context.Context, userID string) error {
+	r.userID = userID
+	return nil
+}
 
 func (*fakeAccessTokenService) Mint(string) (string, error) { return "access-token", nil }
 func (*fakeAccessTokenService) Verify(string) (models.Principal, error) {

@@ -57,6 +57,10 @@ func (c *AuthenticationController) Login(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "email or password is invalid", "")
 		return
 	}
+	if errors.Is(err, services.ErrEmailVerificationRequired) {
+		writeError(w, http.StatusForbidden, "EMAIL_VERIFICATION_REQUIRED", "account is pending verification; a verification email has been queued", "")
+		return
+	}
 
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "AUTHENTICATION_FAILED", "authentication could not be completed", "")

@@ -137,7 +137,7 @@ func New(ctx context.Context) (*App, error) {
 
 	passwords := security.NewBcryptPasswordHasher()
 	emailRepository := emailverification.NewRepository(pool)
-	emailService, err := emailverification.NewService(emailRepository, emailRuntime.tokens)
+	emailService, err := emailverification.NewService(emailRepository, emailRuntime.tokens, emailRuntime.ttl)
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("initialize email verification: %w", err)
@@ -173,6 +173,7 @@ func New(ctx context.Context) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("initialize authentication: %w", err)
 	}
+	authenticationService.SetPendingVerificationService(emailService)
 	authenticationController := controllers.NewAuthenticationController(
 		authenticationService,
 		authRuntime.cookie,

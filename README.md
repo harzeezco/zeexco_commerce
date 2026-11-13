@@ -136,6 +136,11 @@ example, `Zeexco <hello@zeexco.com>`). The API also requires
 environment; never expose the Resend key or HMAC secret to the Next.js
 frontend.
 
+If a merchant submits valid credentials while the account is still `PENDING`,
+login returns `403 EMAIL_VERIFICATION_REQUIRED` and durably queues or renews the
+verification email. No authentication session is created. Incorrect passwords
+continue to return the generic invalid-credentials response.
+
 WhatsApp-first registration is intentionally separate. After validating the
 opaque onboarding token, the frontend calls
 `POST /api/v1/whatsapp/onboarding/register` with required `first_name`,

@@ -117,6 +117,88 @@ func (r *Repository) MarkFailed(ctx context.Context, jobID string, failedAt, ret
 	return nil
 }
 
+func (r *Repository) RequestVerification(
+	ctx context.Context,
+	userID string,
+	now time.Time,
+	expiresAt time.Time,
+) (_ bool, err error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin verification request: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var verificationID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM email_verifications
+		WHERE user_id = $1 AND verified_at IS NULL
+		FOR UPDATE
+	`, userID).Scan(&verificationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, errors.New("pending email verification was not found")
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock pending email verification: %w", err)
+	}
+
+	var outstandingJobID string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE((
+			SELECT id::text FROM email_delivery_jobs
+			WHERE verification_id = $1 AND job_type = 'EMAIL_VERIFICATION'
+			  AND status IN ('PENDING', 'PROCESSING')
+			ORDER BY created_at DESC, id DESC LIMIT 1
+		), '')
+	`, verificationID).Scan(&outstandingJobID); err != nil {
+		return false, fmt.Errorf("inspect verification delivery: %w", err)
+	}
+	if outstandingJobID != "" {
+		return false, tx.Commit(ctx)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE email_verifications SET expires_at = $2 WHERE id = $1
+	`, verificationID, expiresAt); err != nil {
+		return false, fmt.Errorf("renew email verification: %w", err)
+	}
+	var failedJobID string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE((
+			SELECT id::text FROM email_delivery_jobs
+			WHERE verification_id = $1 AND job_type = 'EMAIL_VERIFICATION' AND status = 'FAILED'
+			ORDER BY created_at DESC, id DESC LIMIT 1
+		), '')
+	`, verificationID).Scan(&failedJobID); err != nil {
+		return false, fmt.Errorf("inspect failed verification delivery: %w", err)
+	}
+	if failedJobID != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE email_delivery_jobs
+			SET status = 'PENDING', available_at = $2, last_error = NULL, updated_at = $2
+			WHERE id = $1
+		`, failedJobID, now); err != nil {
+			return false, fmt.Errorf("requeue verification email: %w", err)
+		}
+	} else if _, err := tx.Exec(ctx, `
+		INSERT INTO email_delivery_jobs (verification_id, job_type, available_at)
+		VALUES ($1, 'EMAIL_VERIFICATION', $2)
+	`, verificationID, now); err != nil {
+		return false, fmt.Errorf("queue verification email: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_events (actor_user_id, event_type, metadata)
+		VALUES ($1, 'EMAIL_VERIFICATION_REQUESTED', jsonb_build_object('verification_id', $2::text, 'source', 'login'))
+	`, userID, verificationID); err != nil {
+		return false, fmt.Errorf("audit verification request: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit verification request: %w", err)
+	}
+	return true, nil
+}
+
 func (r *Repository) Verify(ctx context.Context, verificationID string, now time.Time) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {

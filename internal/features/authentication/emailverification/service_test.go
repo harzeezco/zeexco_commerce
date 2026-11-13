@@ -7,10 +7,19 @@ import (
 	"time"
 )
 
-type verificationRepositoryFunc func(context.Context, string, time.Time) error
+type verificationRepositoryStub struct {
+	verify          func(context.Context, string, time.Time) error
+	queued          bool
+	requestedUserID string
+}
 
-func (f verificationRepositoryFunc) Verify(ctx context.Context, id string, now time.Time) error {
-	return f(ctx, id, now)
+func (r *verificationRepositoryStub) Verify(ctx context.Context, id string, now time.Time) error {
+	return r.verify(ctx, id, now)
+}
+
+func (r *verificationRepositoryStub) RequestVerification(_ context.Context, userID string, _, _ time.Time) (bool, error) {
+	r.requestedUserID = userID
+	return r.queued, nil
 }
 
 type recordingNotifier struct{ calls int }
@@ -28,10 +37,10 @@ func TestServiceVerificationCommitsBeforeAsynchronousDeliveryNotification(t *tes
 		t.Fatal(err)
 	}
 	committed := false
-	service, err := NewService(verificationRepositoryFunc(func(context.Context, string, time.Time) error {
+	service, err := NewService(&verificationRepositoryStub{verify: func(context.Context, string, time.Time) error {
 		committed = true
 		return nil
-	}), tokens)
+	}}, tokens, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,9 +63,9 @@ func TestServiceDoesNotNotifyWorkerWhenVerificationFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(verificationRepositoryFunc(func(context.Context, string, time.Time) error {
+	service, err := NewService(&verificationRepositoryStub{verify: func(context.Context, string, time.Time) error {
 		return ErrVerificationConsumed
-	}), tokens)
+	}}, tokens, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,5 +76,47 @@ func TestServiceDoesNotNotifyWorkerWhenVerificationFails(t *testing.T) {
 	}
 	if notifier.calls != 0 {
 		t.Fatalf("notifications=%d", notifier.calls)
+	}
+}
+
+func TestServiceRejectsExpiredSignedTokenBeforeRepository(t *testing.T) {
+	tokens, _ := NewTokenManager([]byte("0123456789abcdef0123456789abcdef"))
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	raw, err := tokens.Mint("00000000-0000-4000-8000-000000000001", expiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	repository := &verificationRepositoryStub{verify: func(context.Context, string, time.Time) error {
+		called = true
+		return nil
+	}}
+	service, err := NewService(repository, tokens, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return expiresAt }
+	if err := service.Verify(context.Background(), raw); !errors.Is(err, ErrVerificationExpired) || called {
+		t.Fatalf("error=%v repository called=%t", err, called)
+	}
+}
+
+func TestServiceRequestsPendingVerificationAndNotifiesWorker(t *testing.T) {
+	tokens, _ := NewTokenManager([]byte("0123456789abcdef0123456789abcdef"))
+	repository := &verificationRepositoryStub{
+		verify: func(context.Context, string, time.Time) error { return nil },
+		queued: true,
+	}
+	service, err := NewService(repository, tokens, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := &recordingNotifier{}
+	service.SetNotifier(notifier)
+	if err := service.Request(context.Background(), "00000000-0000-4000-8000-000000000001"); err != nil {
+		t.Fatal(err)
+	}
+	if repository.requestedUserID == "" || notifier.calls != 1 {
+		t.Fatalf("requested user=%q notifications=%d", repository.requestedUserID, notifier.calls)
 	}
 }
