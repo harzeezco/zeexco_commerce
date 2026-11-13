@@ -1,0 +1,459 @@
+openapi: 3.1.0
+info:
+  title: Zeexco Core API
+  version: 0.4.0
+  description: All responses include an X-Request-ID correlation header. Selected expensive endpoints enforce per-process, per-client fixed-window rate limits.
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: Confirm that the API process is running
+      responses:
+        '200': { description: API process is live. }
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Confirm that the API can reach PostgreSQL
+      responses:
+        '200': { description: API and PostgreSQL are ready. }
+        '503': { description: PostgreSQL is unavailable. }
+  /metrics:
+    get:
+      operationId: getPrometheusMetrics
+      summary: Return Prometheus text-format HTTP and rate-limit metrics
+      responses:
+        '200':
+          description: Current process metrics.
+          content:
+            text/plain: { schema: { type: string } }
+  /webhooks/whatsapp:
+    get:
+      operationId: verifyWhatsAppWebhook
+      summary: Complete Meta webhook verification
+      responses:
+        '200': { description: Returns the supplied verification challenge. }
+        '403': { description: Verification token or mode is invalid. }
+    post:
+      operationId: acceptWhatsAppWebhook
+      summary: Verify and durably enqueue a Meta webhook delivery
+      description: Verifies X-Hub-Signature-256, persists the original delivery in PostgreSQL, and acknowledges before asynchronous message, identity, or onboarding processing.
+      responses:
+        '200': { description: Delivery was durably stored for asynchronous processing. }
+        '400': { description: Authenticated envelope is malformed. }
+        '403': { description: X-Hub-Signature-256 verification failed. }
+        '413': { description: Request body exceeds 1 MiB. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { description: Durable storage failed, so Meta should retry delivery. }
+  /api/v1/whatsapp/flows:
+    post:
+      operationId: exchangeWhatsAppFlowData
+      summary: Process encrypted Meta WhatsApp Flow Data Exchange requests
+      description: >-
+        Meta-compatible data_api_version 3.0 endpoint. Requests must carry a
+        valid X-Hub-Signature-256 and the official encrypted_aes_key,
+        encrypted_flow_data, and initial_vector envelope. Responses are
+        encrypted base64 text, not JSON. Supports ping, INIT, and
+        data_exchange. The flow_token is the opaque server-generated
+        onboarding credential; form fields never identify the WhatsApp user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [encrypted_aes_key, encrypted_flow_data, initial_vector]
+              properties:
+                encrypted_aes_key: { type: string, format: byte }
+                encrypted_flow_data: { type: string, format: byte }
+                initial_vector: { type: string, format: byte }
+      responses:
+        '200':
+          description: Encrypted Meta Flow response.
+          content:
+            text/plain: { schema: { type: string } }
+        '400': { description: Malformed envelope, protocol payload, or unsupported action. }
+        '421': { description: RSA request-key decryption failed; Meta should refresh the configured public key. }
+        '427': { description: The correlated onboarding credential is invalid, expired, or consumed. }
+        '432': { description: X-Hub-Signature-256 verification failed. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { description: The request could not be processed safely. }
+  /api/v1/whatsapp/onboarding/validate:
+    get:
+      operationId: validateWhatsAppOnboardingToken
+      summary: Validate a WhatsApp-originated browser registration token
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Token is pending and the registration form may be shown.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [valid, status, expires_at]
+                properties:
+                  valid: { type: boolean, const: true }
+                  status: { type: string, const: PENDING }
+                  expires_at: { type: string, format: date-time }
+        '400': { description: Token is missing or malformed. }
+        '404': { description: Token is unknown. }
+        '409': { description: Token has already been consumed. }
+        '410': { description: Token has expired. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/whatsapp/onboarding/register:
+    post:
+      operationId: registerWhatsAppMerchant
+      summary: Register a merchant from a verified WhatsApp onboarding session
+      description: >-
+        Atomically creates the user, business, OWNER membership, links the
+        server-derived WhatsApp identity, and consumes the onboarding token.
+        No password or client-supplied WhatsApp identity is accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WhatsAppRegisterRequest' }
+      responses:
+        '201':
+          description: WhatsApp-first merchant registration was committed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { description: Email, identity, or onboarding-token conflict. }
+        '410': { description: The onboarding token has expired. }
+        '413': { description: Request body exceeds 32 KiB. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /get-started:
+    get:
+      operationId: showWhatsAppOnboardingRegistration
+      summary: Show the secure WhatsApp onboarding registration page
+      deprecated: true
+      description: Validates the opaque, short-lived `t` token. The sender identity is derived from the verified webhook session, never a phone-number query parameter.
+      parameters:
+        - in: query
+          name: t
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Mobile-first registration form, or the idempotent completion page for an already-consumed token.
+          content:
+            text/html: { schema: { type: string } }
+        '410':
+          description: Token is malformed, unknown, expired, or in an invalid state.
+          content:
+            text/html: { schema: { type: string } }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      operationId: completeWhatsAppOnboardingRegistration
+      summary: Atomically complete registration and link the verified WhatsApp identity
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token, first_name, last_name, business_name]
+              properties:
+                token: { type: string }
+                first_name: { type: string, maxLength: 100 }
+                last_name: { type: string, maxLength: 100 }
+                email: { type: string, format: email, maxLength: 255 }
+                business_name: { type: string, maxLength: 200 }
+      responses:
+        '200': { description: Registration committed; returns the mobile-first WhatsApp continuation page. }
+        '400': { description: Deterministic registration validation failed. }
+        '409': { description: Email is already registered; no account or identity link was created. }
+        '410': { description: Token is invalid, expired, consumed for submission, or in an invalid state. }
+        '413': { description: Form exceeds 32 KiB. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { description: Completion failed and the transaction was rolled back. }
+  /api/v1/auth/register:
+    post:
+      operationId: registerMerchant
+      summary: Create a user, business, and OWNER membership
+      description: >-
+        Atomically creates a web account and business using required email and
+        password credentials. WhatsApp onboarding is a separate endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '202':
+          description: Pending user, business, OWNER membership, verification record, and durable email job were committed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: The normalized email is registered, the token is consumed, or the WhatsApp identity is already linked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '413': { description: Request body exceeds 16 KiB. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/auth/verify-email:
+    post:
+      operationId: verifyEmail
+      summary: Activate a pending browser account
+      description: Consumes the signed, expiring, single-use token delivered by the verification email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              additionalProperties: false
+              properties:
+                token: { type: string }
+      responses:
+        '204': { description: Email verified and pending user activated. }
+        '400': { description: Token or request body is invalid. }
+        '409': { description: Token was already consumed. }
+        '410': { description: Token has expired. }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      summary: Authenticate with email and password
+      description: >-
+        Returns a short-lived access token for in-memory use and sets the
+        rotating opaque refresh credential in an HttpOnly cookie. The refresh
+        token is never returned in JSON.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Authentication succeeded and the refresh cookie was set.
+          headers:
+            Set-Cookie:
+              description: HttpOnly, Secure by default, SameSite=Lax by default, Path=/api/v1/auth.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthenticationResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/InvalidCredentials' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshAuthentication
+      summary: Rotate the refresh session and mint a new access token
+      security:
+        - refreshCookie: []
+      parameters:
+        - $ref: '#/components/parameters/RequiredOrigin'
+      responses:
+        '200':
+          description: The old credential was consumed and a replacement cookie and access token were issued.
+          headers:
+            Set-Cookie:
+              description: Rotated HttpOnly refresh credential.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthenticationResponse' }
+        '401': { $ref: '#/components/responses/InvalidRefreshSession' }
+        '403': { $ref: '#/components/responses/CSRFRejected' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke the current refresh session
+      description: Revokes and clears the refresh cookie. An access JWT remains valid until its short expiry.
+      security:
+        - refreshCookie: []
+      parameters:
+        - $ref: '#/components/parameters/RequiredOrigin'
+      responses:
+        '204':
+          description: The refresh session is revoked or was already absent.
+          headers:
+            Set-Cookie:
+              description: Expired refresh cookie.
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/CSRFRejected' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/auth/me:
+    get:
+      operationId: getCurrentUser
+      summary: Get the authenticated user and business memberships
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Minimum current-user and business-membership context.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+components:
+  parameters:
+    RequiredOrigin:
+      in: header
+      name: Origin
+      required: true
+      description: Must exactly match PUBLIC_FRONTEND_BASE_URL for cookie-authenticated state changes.
+      schema: { type: string, format: uri }
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived Ed25519-signed access JWT sent from browser memory.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: zeexco_refresh
+      description: Opaque rotating refresh credential; the configured name may differ.
+  responses:
+    RateLimited:
+      description: Per-client request limit exceeded. Retry after the number of seconds in Retry-After.
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    CSRFRejected:
+      description: Origin is absent or does not exactly match the configured frontend origin.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    BadRequest:
+      description: Invalid JSON or deterministic field validation failure.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InvalidCredentials:
+      description: Generic invalid email/password response.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          example:
+            error: { code: INVALID_CREDENTIALS, message: email or password is invalid }
+    InvalidRefreshSession:
+      description: Refresh cookie is absent, expired, revoked, rotated, or invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Bearer access token is absent or invalid.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    InternalError:
+      description: The operation could not be completed safely.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+  schemas:
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [first_name, last_name, business_name, email, password]
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        business_name: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, format: password, minLength: 12, maxLength: 72, writeOnly: true }
+    WhatsAppRegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [first_name, last_name, business_name, onboarding_token]
+      properties:
+        first_name: { type: string, minLength: 1, maxLength: 100 }
+        last_name: { type: string, minLength: 1, maxLength: 100 }
+        business_name: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, format: email, maxLength: 255 }
+        onboarding_token: { type: string, minLength: 1, writeOnly: true }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password, writeOnly: true }
+    AuthenticationResponse:
+      type: object
+      required: [access_token, token_type, expires_in, user, businesses]
+      properties:
+        access_token:
+          type: string
+          description: Hold in memory and send as Authorization Bearer; do not persist by default.
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, format: int64, description: Access-token lifetime in seconds. }
+        user: { $ref: '#/components/schemas/RegisteredUser' }
+        businesses:
+          type: array
+          items: { $ref: '#/components/schemas/AuthenticatedBusiness' }
+    MeResponse:
+      type: object
+      required: [user, businesses]
+      properties:
+        user: { $ref: '#/components/schemas/RegisteredUser' }
+        businesses:
+          type: array
+          items: { $ref: '#/components/schemas/AuthenticatedBusiness' }
+    AuthenticatedBusiness:
+      type: object
+      required: [id, name, status, membership_role]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        membership_role: { type: string, enum: [OWNER, ADMIN, STAFF] }
+    RegisterResponse:
+      type: object
+      required: [user, business, next_step]
+      properties:
+        user: { $ref: '#/components/schemas/RegisteredUser' }
+        business: { $ref: '#/components/schemas/RegisteredBusiness' }
+        next_step: { type: string, enum: [VERIFY_EMAIL, ADD_FIRST_PRODUCT] }
+    RegisteredUser:
+      type: object
+      required: [id, first_name, last_name, status]
+      properties:
+        id: { type: string, format: uuid }
+        first_name: { type: string }
+        last_name: { type: string }
+        email: { type: string, format: email }
+        status: { type: string, enum: [PENDING, ACTIVE, SUSPENDED] }
+    RegisteredBusiness:
+      type: object
+      required: [id, name, status]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            field: { type: string }

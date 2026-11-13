@@ -1,0 +1,112 @@
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:17-alpine
+    container_name: zeexco-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zeexco_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-zeexco}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_password}
+
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+
+    volumes:
+      - zeexco_postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-zeexco} -d ${POSTGRES_DB:-zeexco_dev}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-test:
+    image: postgres:17-alpine
+    profiles: ["integration"]
+    environment:
+      POSTGRES_DB: zeexco_test
+      POSTGRES_USER: zeexco_test
+      POSTGRES_PASSWORD: local_test_password
+    ports:
+      - "${POSTGRES_TEST_PORT:-5434}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zeexco_test -d zeexco_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  # Zeexco Go API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: zeexco-api
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-zeexco}:${POSTGRES_PASSWORD:-local_dev_password}@postgres:5432/${POSTGRES_DB:-zeexco_dev}?sslmode=disable
+      HTTP_READ_HEADER_TIMEOUT: ${HTTP_READ_HEADER_TIMEOUT:-5s}
+      HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-15s}
+      HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-30s}
+      HTTP_IDLE_TIMEOUT: ${HTTP_IDLE_TIMEOUT:-60s}
+      HTTP_SHUTDOWN_TIMEOUT: ${HTTP_SHUTDOWN_TIMEOUT:-10s}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1m}
+      RATE_LIMIT_REGISTER: ${RATE_LIMIT_REGISTER:-5}
+      RATE_LIMIT_LOGIN: ${RATE_LIMIT_LOGIN:-10}
+      RATE_LIMIT_REFRESH: ${RATE_LIMIT_REFRESH:-20}
+      RATE_LIMIT_ONBOARDING_VALIDATE: ${RATE_LIMIT_ONBOARDING_VALIDATE:-30}
+      RATE_LIMIT_WEBHOOK: ${RATE_LIMIT_WEBHOOK:-120}
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: ${WHATSAPP_WEBHOOK_VERIFY_TOKEN}
+      META_APP_SECRET: ${META_APP_SECRET}
+      WHATSAPP_FLOW_PRIVATE_KEY: ${WHATSAPP_FLOW_PRIVATE_KEY:-}
+      WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE: ${WHATSAPP_FLOW_PRIVATE_KEY_PASSPHRASE:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      META_GRAPH_API_VERSION: ${META_GRAPH_API_VERSION:-}
+      PUBLIC_FRONTEND_BASE_URL: ${PUBLIC_FRONTEND_BASE_URL:-}
+      WHATSAPP_ONBOARDING_RETURN_URL: ${WHATSAPP_ONBOARDING_RETURN_URL:-https://wa.me/}
+      WHATSAPP_ONBOARDING_TOKEN_TTL: ${WHATSAPP_ONBOARDING_TOKEN_TTL:-30m}
+      AUTH_JWT_PRIVATE_KEY_BASE64: ${AUTH_JWT_PRIVATE_KEY_BASE64}
+      AUTH_JWT_PUBLIC_KEY_BASE64: ${AUTH_JWT_PUBLIC_KEY_BASE64}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zeexco}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zeexco-api}
+      AUTH_ACCESS_TOKEN_TTL: ${AUTH_ACCESS_TOKEN_TTL:-15m}
+      AUTH_REFRESH_TOKEN_TTL: ${AUTH_REFRESH_TOKEN_TTL:-720h}
+      AUTH_REFRESH_COOKIE_NAME: ${AUTH_REFRESH_COOKIE_NAME:-zeexco_refresh}
+      AUTH_REFRESH_COOKIE_DOMAIN: ${AUTH_REFRESH_COOKIE_DOMAIN:-}
+      AUTH_REFRESH_COOKIE_SECURE: ${AUTH_REFRESH_COOKIE_SECURE:-true}
+      AUTH_REFRESH_COOKIE_SAME_SITE: ${AUTH_REFRESH_COOKIE_SAME_SITE:-Lax}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL}
+      RESEND_API_BASE_URL: ${RESEND_API_BASE_URL:-https://api.resend.com}
+      EMAIL_VERIFICATION_FRONTEND_URL: ${EMAIL_VERIFICATION_FRONTEND_URL}
+      EMAIL_VERIFICATION_HMAC_SECRET_BASE64: ${EMAIL_VERIFICATION_HMAC_SECRET_BASE64}
+      EMAIL_VERIFICATION_TTL: ${EMAIL_VERIFICATION_TTL:-24h}
+      EMAIL_WORKER_POLL_INTERVAL: ${EMAIL_WORKER_POLL_INTERVAL:-250ms}
+      EMAIL_WORKER_RETRY_BASE_DELAY: ${EMAIL_WORKER_RETRY_BASE_DELAY:-30s}
+      EMAIL_WORKER_PROCESSING_LEASE: ${EMAIL_WORKER_PROCESSING_LEASE:-5m}
+      WHATSAPP_MERCHANT_REGISTRATION_FLOW_ID: ${WHATSAPP_MERCHANT_REGISTRATION_FLOW_ID:-}
+      WHATSAPP_FLOW_MODE: ${WHATSAPP_FLOW_MODE:-published}
+      WHATSAPP_WEBHOOK_WORKER_POLL_INTERVAL: ${WHATSAPP_WEBHOOK_WORKER_POLL_INTERVAL:-250ms}
+      WHATSAPP_WEBHOOK_RETRY_DELAY: ${WHATSAPP_WEBHOOK_RETRY_DELAY:-5s}
+      WHATSAPP_WEBHOOK_PROCESSING_LEASE: ${WHATSAPP_WEBHOOK_PROCESSING_LEASE:-5m}
+      WHATSAPP_WEBHOOK_MAX_ATTEMPTS: ${WHATSAPP_WEBHOOK_MAX_ATTEMPTS:-5}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  zeexco_postgres_data:

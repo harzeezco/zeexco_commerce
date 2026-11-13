@@ -1,0 +1,85 @@
+{
+  "version": "7.3",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "REGISTRATION": []
+  },
+  "screens": [
+    {
+      "id": "REGISTRATION",
+      "title": "Set up your business",
+      "terminal": true,
+      "data": {
+        "has_error": {
+          "type": "boolean",
+          "__example__": false
+        },
+        "error_message": {
+          "type": "string",
+          "__example__": ""
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "registration_form",
+            "children": [
+              {
+                "type": "TextInput",
+                "name": "first_name",
+                "label": "First name",
+                "input-type": "text",
+                "required": true,
+                "max-chars": 100
+              },
+              {
+                "type": "TextInput",
+                "name": "last_name",
+                "label": "Last name",
+                "input-type": "text",
+                "required": true,
+                "max-chars": 100
+              },
+              {
+                "type": "TextInput",
+                "name": "business_name",
+                "label": "Business name",
+                "input-type": "text",
+                "required": true,
+                "max-chars": 200
+              },
+              {
+                "type": "TextInput",
+                "name": "email",
+                "label": "Email (optional)",
+                "input-type": "email",
+                "required": false,
+                "max-chars": 255
+              },
+              {
+                "type": "TextBody",
+                "text": "${data.error_message}",
+                "visible": "${data.has_error}"
+              },
+              {
+                "type": "Footer",
+                "label": "Create my business",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "first_name": "${form.first_name}",
+                    "last_name": "${form.last_name}",
+                    "business_name": "${form.business_name}",
+                    "email": "${form.email}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+/auth-private.pem
+/auth-public.pem
+*.pem
