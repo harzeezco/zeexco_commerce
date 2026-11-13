@@ -1800,14 +1800,34 @@ sequenceDiagram
     Inbox-->>UI: User opens signed activation URL
     UI->>API: POST /api/v1/auth/verify-email {token}
     API->>DB: Lock verification, validate expiry and single use
-    API->>DB: Set user ACTIVE + verified_at + audit event
+    API->>DB: Set user ACTIVE + verified_at
+    API->>DB: Insert one WELCOME delivery job + audit events
+    API->>DB: COMMIT
     API-->>UI: 204 No Content
     UI-->>UI: Redirect to login
+
+    Worker->>DB: Claim WELCOME job (FOR UPDATE SKIP LOCKED)
+    Worker->>Resend: Send welcome email + stable Idempotency-Key
+    alt Resend accepted
+        Worker->>DB: Mark WELCOME job SENT
+    else timeout or provider failure
+        Worker->>DB: Mark FAILED + next retry time
+    end
 ```
 
 The job claim uses a processing lease, so another process can recover work
 after a crash. Multiple API instances can run workers concurrently because
 claims use `SKIP LOCKED`. The stable provider idempotency key also protects the
 ambiguous case where Resend accepted a message but the worker crashed before
-recording `SENT`.
+recording `SENT`. A unique `(verification_id, job_type)` database constraint,
+together with the verification-row lock and single transaction, ensures that
+concurrent or repeated verification requests cannot queue duplicate welcome
+emails.
+
+Email purpose is explicit in the durable job. Security messages such as email
+verification use `RESEND_SECURITY_FROM_EMAIL`; lifecycle messages such as the
+welcome email use `RESEND_LIFECYCLE_FROM_EMAIL`. Templates and purpose routing
+remain separate from the Resend HTTP client. Provider calls happen only after
+the activation transaction commits, so provider availability never determines
+whether a valid account activation succeeds.
 

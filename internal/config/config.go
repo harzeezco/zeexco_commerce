@@ -44,7 +44,8 @@ type Config struct {
 	WhatsAppWebhookProcessingLease     string
 	WhatsAppWebhookMaxAttempts         string
 	ResendAPIKey                       string
-	ResendFromEmail                    string
+	ResendSecurityFromEmail            string
+	ResendLifecycleFromEmail           string
 	ResendAPIBaseURL                   string
 	EmailVerificationFrontendURL       string
 	EmailVerificationHMACSecretBase64  string
@@ -97,7 +98,8 @@ func Load() Config {
 		WhatsAppWebhookProcessingLease:     getEnv("WHATSAPP_WEBHOOK_PROCESSING_LEASE", "5m"),
 		WhatsAppWebhookMaxAttempts:         getEnv("WHATSAPP_WEBHOOK_MAX_ATTEMPTS", "5"),
 		ResendAPIKey:                       os.Getenv("RESEND_API_KEY"),
-		ResendFromEmail:                    os.Getenv("RESEND_FROM_EMAIL"),
+		ResendSecurityFromEmail:            os.Getenv("RESEND_SECURITY_FROM_EMAIL"),
+		ResendLifecycleFromEmail:           os.Getenv("RESEND_LIFECYCLE_FROM_EMAIL"),
 		ResendAPIBaseURL:                   getEnv("RESEND_API_BASE_URL", "https://api.resend.com"),
 		EmailVerificationFrontendURL:       os.Getenv("EMAIL_VERIFICATION_FRONTEND_URL"),
 		EmailVerificationHMACSecretBase64:  os.Getenv("EMAIL_VERIFICATION_HMAC_SECRET_BASE64"),

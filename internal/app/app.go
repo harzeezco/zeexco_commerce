@@ -147,6 +147,7 @@ func New(ctx context.Context) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("initialize verification email worker: %w", err)
 	}
+	emailService.SetNotifier(emailWorker)
 	registrationRepository := authrepositories.NewRegistrationRepositoryWithVerificationTTL(pool, emailRuntime.ttl)
 	registerService, err := services.NewRegisterService(
 		registrationRepository,
@@ -365,7 +366,8 @@ func loadEmailVerificationRuntime(cfg config.Config) (emailVerificationRuntime, 
 		return emailVerificationRuntime{}, err
 	}
 	sender, err := emailverification.NewResendClient(emailverification.ResendConfig{
-		APIKey: cfg.ResendAPIKey, From: cfg.ResendFromEmail, BaseURL: cfg.ResendAPIBaseURL,
+		APIKey: cfg.ResendAPIKey, SecurityFrom: cfg.ResendSecurityFromEmail,
+		LifecycleFrom: cfg.ResendLifecycleFromEmail, BaseURL: cfg.ResendAPIBaseURL,
 	})
 	if err != nil {
 		return emailVerificationRuntime{}, err

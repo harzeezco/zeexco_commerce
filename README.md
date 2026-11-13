@@ -114,15 +114,27 @@ log in until the email address is verified.
 
 The `202 Accepted` response contains the pending user, business, and
 `"next_step":"VERIFY_EMAIL"`. A database-backed worker sends the activation
-message through Resend outside the request path. Failed and interrupted jobs
-are retried with exponential backoff; Resend receives a stable idempotency key
-so retries do not intentionally duplicate mail.
+message through Resend from the configured security sender outside the request
+path. Failed and interrupted jobs are retried with exponential backoff; Resend
+receives a stable idempotency key so retries do not intentionally duplicate
+mail.
 
 The activation page reads the signed `token` query parameter and sends
 `{"token":"..."}` to `POST /api/v1/auth/verify-email`. A valid, unexpired,
-single-use token changes the user to `ACTIVE`; the frontend can then redirect
-to login. Registration does not create a WhatsApp identity or auto-login.
-The authoritative local contract is `docs/api/openapi.yaml`.
+single-use token atomically changes the user to `ACTIVE` and queues one welcome
+email. The same worker sends that welcome email from the lifecycle sender; a
+temporary Resend failure cannot roll back activation. The frontend can then
+redirect to login. Registration does not create a WhatsApp identity or
+auto-login. The authoritative local contract is `docs/api/openapi.yaml`.
+
+Email delivery requires `RESEND_API_KEY`,
+`RESEND_SECURITY_FROM_EMAIL` (for example,
+`Zeexco <no-reply@zeexco.com>`), and `RESEND_LIFECYCLE_FROM_EMAIL` (for
+example, `Zeexco <hello@zeexco.com>`). The API also requires
+`EMAIL_VERIFICATION_FRONTEND_URL` and
+`EMAIL_VERIFICATION_HMAC_SECRET_BASE64`. These values belong only in the Go API
+environment; never expose the Resend key or HMAC secret to the Next.js
+frontend.
 
 WhatsApp-first registration is intentionally separate. After validating the
 opaque onboarding token, the frontend calls

@@ -14,7 +14,10 @@ type Service struct {
 	repository VerificationRepository
 	tokens     *TokenManager
 	now        func() time.Time
+	notifier   interface{ Notify() }
 }
+
+func (s *Service) SetNotifier(notifier interface{ Notify() }) { s.notifier = notifier }
 
 func NewService(repository VerificationRepository, tokens *TokenManager) (*Service, error) {
 	if repository == nil || tokens == nil {
@@ -28,5 +31,11 @@ func (s *Service) Verify(ctx context.Context, rawToken string) error {
 	if err != nil {
 		return ErrInvalidToken
 	}
-	return s.repository.Verify(ctx, claims.VerificationID, s.now().UTC())
+	if err := s.repository.Verify(ctx, claims.VerificationID, s.now().UTC()); err != nil {
+		return err
+	}
+	if s.notifier != nil {
+		s.notifier.Notify()
+	}
+	return nil
 }

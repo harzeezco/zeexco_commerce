@@ -90,7 +90,8 @@ func TestLoadAuthenticationRuntimeFailsClosed(t *testing.T) {
 func TestLoadEmailVerificationRuntimeFailsClosedAndUsesDurations(t *testing.T) {
 	secret := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	runtime, err := loadEmailVerificationRuntime(config.Config{
-		ResendAPIKey: "re_test", ResendFromEmail: "Zeexco <accounts@example.com>",
+		ResendAPIKey: "re_test", ResendSecurityFromEmail: "Zeexco <no-reply@zeexco.com>",
+		ResendLifecycleFromEmail:          "Zeexco <hello@zeexco.com>",
 		ResendAPIBaseURL:                  "https://api.resend.com",
 		EmailVerificationFrontendURL:      "https://www.zeexco.com/activate-account",
 		EmailVerificationHMACSecretBase64: secret, EmailVerificationTTL: "24h",

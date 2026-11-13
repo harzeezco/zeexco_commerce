@@ -1,96 +1,179 @@
-We need to enable our existing WhatsApp Merchant Registration Flow for draft-mode testing while the Meta Flow is not yet published.
+Update the existing Zeexco asynchronous email infrastructure so different email purposes use the appropriate sender identity.
 
-Context:
+## Context
 
-- Existing Flow ID: `2198301500826080`
-- Existing registration screen: `REGISTRATION`
-- Existing backend already creates genuine onboarding sessions and opaque onboarding tokens.
-- Existing Cloud API integration already sends the Merchant Registration WhatsApp Flow.
-- Existing encrypted Flow Data endpoint is working.
-- Browser fallback must remain unchanged.
-- Do NOT redesign registration.
-- Do NOT create fake onboarding tokens.
-- Do NOT change the Flow endpoint contract.
-- Do NOT change registration business logic.
-- Do NOT start Product work.
+Zeexco uses Resend for transactional email.
 
-Goal:
+We now have two email addresses on our verified `zeexco.com` domain:
 
-Allow the existing WhatsApp Flow message to run in Meta draft/test mode through configuration so we can complete a real end-to-end WhatsApp registration test before the Flow is published.
+- `no-reply@zeexco.com`
+- `hello@zeexco.com`
 
-Implementation requirements:
+The intended responsibility is:
 
-1. Inspect the existing WhatsApp configuration and Cloud API Flow-message implementation first.
+### Security/system email
 
-2. Add a configuration value:
+Use:
 
-`WHATSAPP_FLOW_MODE`
+`Zeexco <no-reply@zeexco.com>`
 
-Supported values should be limited to the modes actually supported by the WhatsApp Flow message API.
+for emails such as:
 
-For our current test environment we want:
+- Email verification / account activation
+- Password reset
+- Password changed notifications
+- Other future authentication/security notifications
 
-`WHATSAPP_FLOW_MODE=draft`
+### Lifecycle/human-friendly email
 
-3. Pass the configured mode into the existing interactive WhatsApp Flow message in the correct Meta-supported location.
+Use:
 
-Do not guess the payload structure. Verify it against the existing implementation and Meta's expected Flow interactive-message schema.
+`Zeexco <hello@zeexco.com>`
 
-4. Preserve all existing Flow parameters, including:
+for:
 
-- Flow ID `2198301500826080` from configuration
-- `flow_message_version`
-- `flow_token`
-- `flow_action`
-- navigation to `REGISTRATION`
-- existing CTA
-- existing browser fallback
+- Welcome to Zeexco
+- Future merchant onboarding/lifecycle communication where a friendly sender is appropriate
 
-5. The `flow_token` MUST remain the genuine opaque Zeexco onboarding token generated from the server-side onboarding session.
+Do not hardcode either address throughout application services.
 
-Never replace it with a static development token.
+## Configuration
 
-The intended path remains:
+Replace/generalize the existing single `RESEND_FROM_EMAIL` configuration if appropriate and introduce explicit configuration such as:
 
-Unknown WhatsApp sender
-→ create onboarding session
-→ generate genuine onboarding token
-→ send Get started Flow CTA
-→ Flow opens in draft/test mode
-→ token travels through the Flow
-→ encrypted Flow endpoint validates the real onboarding session
-→ registration completes normally.
+`RESEND_SECURITY_FROM_EMAIL="Zeexco <no-reply@zeexco.com>"`
 
-6. Configuration must fail safely.
+`RESEND_LIFECYCLE_FROM_EMAIL="Zeexco <hello@zeexco.com>"`
 
-Do not silently accept arbitrary Flow modes.
+Keep:
 
-Use a sensible default that does not accidentally enable an unsafe production behavior. Follow the existing project's configuration conventions.
+`RESEND_API_KEY`
 
-7. Update Docker Compose/environment propagation if `WHATSAPP_FLOW_MODE` needs to be passed into the API container.
+`EMAIL_VERIFICATION_FRONTEND_URL=http://localhost:3000/verify-email`
 
-8. Add/update focused tests covering:
+`EMAIL_VERIFICATION_HMAC_SECRET_BASE64`
 
-- draft mode produces the expected Flow payload
-- genuine flow_token is preserved
-- existing REGISTRATION screen remains unchanged
-- invalid configuration is handled safely
-- existing fallback behavior remains intact
+Update `.env.example`, configuration loading/validation, tests, and relevant documentation.
 
-9. Do not alter unrelated code.
+Never expose the Resend API key or HMAC secret to the Next.js frontend.
 
-10. Run the relevant Go tests and `go vet ./...`.
+## Email verification
 
-At the end, report:
+The existing email-verification flow should continue to use the durable asynchronous PostgreSQL outbox/worker architecture.
+
+Verification emails must be sent from:
+
+`Zeexco <no-reply@zeexco.com>`
+
+Do not call Resend synchronously from the registration request.
+
+Preserve the existing retry, idempotency, locking, token-expiry, rate-limiting, audit, and crash-recovery behavior.
+
+## Welcome email
+
+Add a Welcome to Zeexco email.
+
+The welcome email must NOT be created when the initial registration request creates a PENDING user.
+
+It should only be queued after email verification successfully transitions the user from PENDING to ACTIVE.
+
+Desired flow:
+
+Register
+→ user PENDING
+→ verification email job
+→ worker
+→ Resend from no-reply@zeexco.com
+→ user clicks verification link
+→ POST /api/v1/auth/verify-email
+→ atomically transition user to ACTIVE
+→ create durable welcome-email job
+→ commit
+→ worker sends welcome email asynchronously
+→ Resend from hello@zeexco.com
+
+The verification request must not wait for Resend.
+
+If Resend is temporarily unavailable, successful account activation must remain successful and the welcome email must retry through the existing durable job mechanism.
+
+Ensure duplicate verification requests, retries, worker crashes, or concurrent workers cannot produce duplicate welcome emails. Use database constraints/idempotency and the existing worker/outbox architecture rather than in-memory protection.
+
+## Welcome email content
+
+Create a clean, professional, responsive Zeexco welcome email.
+
+Keep the language simple and merchant-focused.
+
+Suggested intent:
+
+"Welcome to Zeexco"
+
+Confirm that their account is ready and briefly explain that Zeexco helps them manage and grow their business.
+
+Provide a clear CTA to log in/get started.
+
+Do not make claims about features that are not implemented yet.
+
+Keep email templates separated from provider/infrastructure code so templates can evolve without changing the Resend client.
+
+Provide both HTML and sensible plain-text content if the current email infrastructure supports it.
+
+## Architecture
+
+Resend must remain an infrastructure provider, not business logic.
+
+Prefer a structure where application/domain code expresses the email purpose (verification, welcome, etc.) and the email infrastructure determines the configured sender/template.
+
+Do not duplicate the existing worker system just for welcome emails. Extend/generalize the current durable email job infrastructure where appropriate.
+
+Do not introduce Redis, Kafka, or another queue for this task. PostgreSQL remains the durable coordination mechanism.
+
+## Frontend URL
+
+The Zeexco frontend is Next.js and currently runs locally at:
+
+`http://localhost:3000`
+
+Email verification links should therefore use:
+
+`http://localhost:3000/verify-email`
+
+through the existing `EMAIL_VERIFICATION_FRONTEND_URL` configuration.
+
+Do not hardcode localhost into application logic.
+
+## Validation
+
+Add/update tests covering at minimum:
+
+1. Verification email uses the security/no-reply sender.
+2. Welcome email uses the lifecycle/hello sender.
+3. PENDING registration does not queue a welcome email.
+4. Successful first verification queues exactly one welcome email.
+5. Reusing a verification token does not queue another welcome email.
+6. Concurrent verification cannot queue duplicate welcome emails.
+7. Resend failure does not roll back successful verification.
+8. Failed welcome-email jobs retry.
+9. Worker crash/recovery preserves idempotency.
+10. Configuration rejects malformed/missing required sender configuration where appropriate.
+11. Existing authentication/email-verification tests continue to pass.
+
+Run:
+
+- full Go test suite
+- relevant integration tests where available
+- `go vet ./...`
+
+Update architecture documentation and OpenAPI documentation if behavior/contracts changed.
+
+Before making major architectural changes, inspect the existing implementation and extend the established patterns rather than replacing working email-verification infrastructure unnecessarily.
+
+At completion, report:
 
 - files changed
-- exact payload field added/changed
-- how `WHATSAPP_FLOW_MODE` is parsed
-- default behavior when it is missing
-- test results
-- vet result
-- exact command/environment change I need to apply locally
-
-Do not proceed to Product implementation.
-
-Our immediate goal after this task is a real end-to-end draft WhatsApp registration test.
+- database/schema changes
+- environment variables required
+- email job types introduced/changed
+- how duplicate welcome emails are prevented
+- tests executed and results
+- anything requiring manual/live verification

@@ -207,7 +207,10 @@ paths:
     post:
       operationId: verifyEmail
       summary: Activate a pending browser account
-      description: Consumes the signed, expiring, single-use token delivered by the verification email.
+      description: >-
+        Atomically consumes the signed, expiring, single-use token, activates
+        the pending account, and queues one durable asynchronous welcome email.
+        The request does not wait for the email provider.
       requestBody:
         required: true
         content:
@@ -219,7 +222,7 @@ paths:
               properties:
                 token: { type: string }
       responses:
-        '204': { description: Email verified and pending user activated. }
+        '204': { description: Email verified, pending user activated, and welcome email durably queued. }
         '400': { description: Token or request body is invalid. }
         '409': { description: Token was already consumed. }
         '410': { description: Token has expired. }

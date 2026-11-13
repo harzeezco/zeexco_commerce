@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strings"
 	"time"
@@ -23,17 +24,19 @@ type HTTPDoer interface {
 }
 
 type ResendConfig struct {
-	APIKey     string
-	From       string
-	BaseURL    string
-	HTTPClient HTTPDoer
+	APIKey        string
+	SecurityFrom  string
+	LifecycleFrom string
+	BaseURL       string
+	HTTPClient    HTTPDoer
 }
 
 type ResendClient struct {
-	apiKey     string
-	from       string
-	endpoint   string
-	httpClient HTTPDoer
+	apiKey        string
+	securityFrom  string
+	lifecycleFrom string
+	endpoint      string
+	httpClient    HTTPDoer
 }
 
 type ResendError struct {
@@ -48,8 +51,13 @@ func NewResendClient(cfg ResendConfig) (*ResendClient, error) {
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		return nil, errors.New("RESEND_API_KEY is required")
 	}
-	if strings.TrimSpace(cfg.From) == "" || !strings.Contains(cfg.From, "@") {
-		return nil, errors.New("RESEND_FROM_EMAIL is required")
+	securityFrom, err := validSender("RESEND_SECURITY_FROM_EMAIL", cfg.SecurityFrom)
+	if err != nil {
+		return nil, err
+	}
+	lifecycleFrom, err := validSender("RESEND_LIFECYCLE_FROM_EMAIL", cfg.LifecycleFrom)
+	if err != nil {
+		return nil, err
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if baseURL == "" {
@@ -70,14 +78,24 @@ func NewResendClient(cfg ResendConfig) (*ResendClient, error) {
 		}
 	}
 	return &ResendClient{
-		apiKey: cfg.APIKey, from: cfg.From,
+		apiKey: cfg.APIKey, securityFrom: securityFrom, lifecycleFrom: lifecycleFrom,
 		endpoint: strings.TrimRight(baseURL, "/") + "/emails", httpClient: httpClient,
 	}, nil
+}
+
+func validSender(name, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address == "" || !strings.Contains(address.Address, "@") {
+		return "", fmt.Errorf("%s must be a valid email sender", name)
+	}
+	return value, nil
 }
 
 func (c *ResendClient) Send(
 	ctx context.Context,
 	jobID string,
+	purpose EmailPurpose,
 	to string,
 	subject string,
 	htmlBody string,
@@ -87,8 +105,12 @@ func (c *ResendClient) Send(
 		strings.TrimSpace(subject) == "" || strings.TrimSpace(htmlBody) == "" {
 		return "", errors.New("complete Resend email input is required")
 	}
+	from, prefix, err := c.senderFor(purpose)
+	if err != nil {
+		return "", err
+	}
 	payload, err := json.Marshal(map[string]any{
-		"from": c.from, "to": []string{to}, "subject": subject,
+		"from": from, "to": []string{to}, "subject": subject,
 		"html": htmlBody, "text": textBody,
 	})
 	if err != nil {
@@ -100,7 +122,7 @@ func (c *ResendClient) Send(
 	}
 	request.Header.Set("Authorization", "Bearer "+c.apiKey)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", "email-verification/"+jobID)
+	request.Header.Set("Idempotency-Key", prefix+"/"+jobID)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("send Resend email: %w", err)
@@ -123,4 +145,15 @@ func (c *ResendClient) Send(
 		return "", errors.New("Resend returned a malformed response")
 	}
 	return result.ID, nil
+}
+
+func (c *ResendClient) senderFor(purpose EmailPurpose) (from, idempotencyPrefix string, err error) {
+	switch purpose {
+	case EmailPurposeSecurity:
+		return c.securityFrom, "email-verification", nil
+	case EmailPurposeLifecycle:
+		return c.lifecycleFrom, "welcome", nil
+	default:
+		return "", "", errors.New("unsupported email purpose")
+	}
 }

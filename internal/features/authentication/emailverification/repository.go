@@ -34,12 +34,13 @@ func (r *Repository) ClaimNext(
 
 	var job DeliveryJob
 	err = tx.QueryRow(ctx, `
-		SELECT j.id::text, j.verification_id::text, v.user_id::text,
+		SELECT j.id::text, j.job_type, j.verification_id::text, v.user_id::text,
 		       u.email, u.first_name, v.expires_at, j.attempt_count
 		FROM email_delivery_jobs j
 		JOIN email_verifications v ON v.id = j.verification_id
 		JOIN users u ON u.id = v.user_id
-		WHERE v.verified_at IS NULL
+		WHERE ((j.job_type = 'EMAIL_VERIFICATION' AND v.verified_at IS NULL)
+		    OR (j.job_type = 'WELCOME' AND v.verified_at IS NOT NULL))
 		  AND (
 		    (j.status IN ('PENDING', 'FAILED') AND j.available_at <= $1)
 		    OR (j.status = 'PROCESSING' AND j.processing_started_at <= $2)
@@ -48,7 +49,7 @@ func (r *Repository) ClaimNext(
 		FOR UPDATE OF j SKIP LOCKED
 		LIMIT 1
 	`, now, staleBefore).Scan(
-		&job.ID, &job.VerificationID, &job.UserID, &job.Email,
+		&job.ID, &job.JobType, &job.VerificationID, &job.UserID, &job.Email,
 		&job.FirstName, &job.ExpiresAt, &job.AttemptCount,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -57,7 +58,7 @@ func (r *Repository) ClaimNext(
 	if err != nil {
 		return DeliveryJob{}, false, fmt.Errorf("select email job: %w", err)
 	}
-	if !now.Before(job.ExpiresAt) {
+	if job.JobType == JobTypeEmailVerification && !now.Before(job.ExpiresAt) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE email_verifications SET expires_at = $2 WHERE id = $1 AND verified_at IS NULL
 		`, job.VerificationID, renewalExpiry); err != nil {
@@ -88,10 +89,10 @@ func (r *Repository) MarkSent(ctx context.Context, jobID, providerMessageID stri
 		WHERE id = $1 AND status = 'PROCESSING'
 	`, jobID, sentAt, providerMessageID)
 	if err != nil {
-		return fmt.Errorf("mark verification email sent: %w", err)
+		return fmt.Errorf("mark email job sent: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return errors.New("verification email job is not processing")
+		return errors.New("email job is not processing")
 	}
 	return nil
 }
@@ -108,10 +109,10 @@ func (r *Repository) MarkFailed(ctx context.Context, jobID string, failedAt, ret
 		WHERE id = $1 AND status = 'PROCESSING'
 	`, jobID, failedAt, retryAt, message)
 	if err != nil {
-		return fmt.Errorf("mark verification email failed: %w", err)
+		return fmt.Errorf("mark email job failed: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return errors.New("verification email job is not processing")
+		return errors.New("email job is not processing")
 	}
 	return nil
 }
@@ -155,10 +156,22 @@ func (r *Repository) Verify(ctx context.Context, verificationID string, now time
 		return fmt.Errorf("consume email verification: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
+		INSERT INTO email_delivery_jobs (verification_id, job_type, available_at)
+		VALUES ($1, 'WELCOME', $2)
+	`, verificationID, now); err != nil {
+		return fmt.Errorf("queue welcome email: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_events (actor_user_id, event_type, metadata)
 		VALUES ($1, 'EMAIL_VERIFIED', jsonb_build_object('verification_id', $2::text))
 	`, userID, verificationID); err != nil {
 		return fmt.Errorf("audit email verification: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_events (actor_user_id, event_type, metadata)
+		VALUES ($1, 'WELCOME_EMAIL_QUEUED', jsonb_build_object('verification_id', $2::text))
+	`, userID, verificationID); err != nil {
+		return fmt.Errorf("audit welcome email queue: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit email verification: %w", err)

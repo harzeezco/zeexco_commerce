@@ -32,6 +32,16 @@ func TestLoadUsesSafeAuthenticationDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadReadsPurposeSpecificResendSenders(t *testing.T) {
+	t.Setenv("RESEND_SECURITY_FROM_EMAIL", "Zeexco <no-reply@zeexco.com>")
+	t.Setenv("RESEND_LIFECYCLE_FROM_EMAIL", "Zeexco <hello@zeexco.com>")
+	cfg := Load()
+	if cfg.ResendSecurityFromEmail != "Zeexco <no-reply@zeexco.com>" ||
+		cfg.ResendLifecycleFromEmail != "Zeexco <hello@zeexco.com>" {
+		t.Fatalf("Resend sender configuration=%#v", cfg)
+	}
+}
+
 func TestLoadUsesPublicFrontendOriginWithLegacyFallback(t *testing.T) {
 	t.Setenv("PUBLIC_FRONTEND_BASE_URL", "https://www.zeexco.com")
 	t.Setenv("WHATSAPP_ONBOARDING_PUBLIC_BASE_URL", "https://legacy.example")

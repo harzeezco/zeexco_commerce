@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/harzeezco/zeexco_commerce/internal/features/authentication/emailverification"
 	authmodels "github.com/harzeezco/zeexco_commerce/internal/features/authentication/models"
 	"github.com/harzeezco/zeexco_commerce/internal/features/authentication/security"
 	"github.com/harzeezco/zeexco_commerce/internal/features/authentication/services"
@@ -232,6 +233,9 @@ func TestPostgresRegistrationFoundation(t *testing.T) {
 	t.Run("duplicate email has no orphans", testDuplicateEmailHasNoOrphans)
 	t.Run("business failure rolls back user", testRegistrationRollback)
 	t.Run("concurrent duplicate email has one winner", testConcurrentRegistration)
+	t.Run("first verification queues one welcome email", testVerificationQueuesWelcomeEmail)
+	t.Run("concurrent verification cannot duplicate welcome email", testConcurrentVerificationQueuesOneWelcome)
+	t.Run("failed welcome job retries and stale claim recovers", testWelcomeJobRetryAndCrashRecovery)
 }
 
 func testSuccessfulPostgresRegistration(t *testing.T) {
@@ -262,6 +266,8 @@ func testSuccessfulPostgresRegistration(t *testing.T) {
 	assertTableCount(t, ctx, pool, "audit_events", 3)
 	assertTableCount(t, ctx, pool, "email_verifications", 1)
 	assertTableCount(t, ctx, pool, "email_delivery_jobs", 1)
+	assertEmailJobTypeCount(t, ctx, pool, emailverification.JobTypeEmailVerification, 1)
+	assertEmailJobTypeCount(t, ctx, pool, emailverification.JobTypeWelcome, 0)
 	assertTableCount(t, ctx, pool, "whatsapp_identities", 0)
 
 	var passwordHash string
@@ -287,6 +293,114 @@ func testSuccessfulPostgresRegistration(t *testing.T) {
 	}
 	if userRegistered != 1 || businessCreated != 1 || verificationRequested != 1 {
 		t.Fatalf("audit events USER_REGISTERED=%d BUSINESS_CREATED=%d EMAIL_VERIFICATION_REQUESTED=%d", userRegistered, businessCreated, verificationRequested)
+	}
+}
+
+func testVerificationQueuesWelcomeEmail(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedRegistrationTestPool(t, ctx)
+	registration := registerIntegrationUser(t, ctx, pool, "verified@example.com")
+	verificationID, expiresAt := loadVerification(t, ctx, pool, registration.User.ID)
+	repository := emailverification.NewRepository(pool)
+	now := expiresAt.Add(-time.Minute)
+	if err := repository.Verify(ctx, verificationID, now); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM users WHERE id = $1`, registration.User.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ACTIVE" {
+		t.Fatalf("status=%s", status)
+	}
+	assertEmailJobTypeCount(t, ctx, pool, emailverification.JobTypeWelcome, 1)
+	if err := repository.Verify(ctx, verificationID, now); !errors.Is(err, emailverification.ErrVerificationConsumed) {
+		t.Fatalf("reused verification error=%v", err)
+	}
+	assertEmailJobTypeCount(t, ctx, pool, emailverification.JobTypeWelcome, 1)
+}
+
+func testConcurrentVerificationQueuesOneWelcome(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedRegistrationTestPool(t, ctx)
+	registration := registerIntegrationUser(t, ctx, pool, "concurrent-verify@example.com")
+	verificationID, expiresAt := loadVerification(t, ctx, pool, registration.User.ID)
+	repository := emailverification.NewRepository(pool)
+	const attempts = 8
+	results := make(chan error, attempts)
+	var waitGroup sync.WaitGroup
+	for range attempts {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			results <- repository.Verify(context.Background(), verificationID, expiresAt.Add(-time.Minute))
+		}()
+	}
+	waitGroup.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, emailverification.ErrVerificationConsumed) {
+			t.Fatalf("unexpected error=%v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successes=%d", successes)
+	}
+	assertEmailJobTypeCount(t, ctx, pool, emailverification.JobTypeWelcome, 1)
+}
+
+func testWelcomeJobRetryAndCrashRecovery(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedRegistrationTestPool(t, ctx)
+	registration := registerIntegrationUser(t, ctx, pool, "welcome-retry@example.com")
+	verificationID, expiresAt := loadVerification(t, ctx, pool, registration.User.ID)
+	repository := emailverification.NewRepository(pool)
+	now := expiresAt.Add(-time.Minute)
+	if err := repository.Verify(ctx, verificationID, now); err != nil {
+		t.Fatal(err)
+	}
+	job, claimed, err := repository.ClaimNext(ctx, now, now.Add(-time.Minute), now.Add(time.Hour))
+	if err != nil || !claimed || job.JobType != emailverification.JobTypeWelcome {
+		t.Fatalf("job=%#v claimed=%t error=%v", job, claimed, err)
+	}
+	retryAt := now.Add(time.Minute)
+	if err := repository.MarkFailed(ctx, job.ID, now, retryAt, "temporary provider failure"); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := repository.ClaimNext(ctx, now, now.Add(-time.Minute), now.Add(time.Hour)); err != nil || claimed {
+		t.Fatalf("early retry claimed=%t error=%v", claimed, err)
+	}
+	retried, claimed, err := repository.ClaimNext(ctx, retryAt, retryAt.Add(-time.Minute), retryAt.Add(time.Hour))
+	if err != nil || !claimed || retried.ID != job.ID || retried.AttemptCount != 2 {
+		t.Fatalf("retried=%#v claimed=%t error=%v", retried, claimed, err)
+	}
+	recovered, claimed, err := repository.ClaimNext(ctx, retryAt.Add(2*time.Minute), retryAt.Add(time.Minute), retryAt.Add(time.Hour))
+	if err != nil || !claimed || recovered.ID != job.ID || recovered.AttemptCount != 3 {
+		t.Fatalf("recovered=%#v claimed=%t error=%v", recovered, claimed, err)
+	}
+}
+
+func loadVerification(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID string) (string, time.Time) {
+	t.Helper()
+	var id string
+	var expiresAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT id::text, expires_at FROM email_verifications WHERE user_id = $1`, userID).Scan(&id, &expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	return id, expiresAt
+}
+
+func assertEmailJobTypeCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, jobType string, want int) {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM email_delivery_jobs WHERE job_type = $1`, jobType).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("email job type %s count=%d want=%d", jobType, count, want)
 	}
 }
 
