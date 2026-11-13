@@ -1768,6 +1768,13 @@ keeps Resend latency out of the HTTP request while guaranteeing that a
 committed web account always has a committed delivery job. A `PENDING` account
 cannot authenticate.
 
+The HTTP API and background processors are separate deployable processes built
+from the same Go repository. The API only persists jobs and webhook events. The
+worker process owns email delivery and WhatsApp webhook processing, allowing it
+to restart and scale independently without taking down HTTP traffic. These
+operational jobs remain in PostgreSQL; Kafka is reserved for asynchronous domain
+events and consumers such as the separate Python Agent Platform.
+
 ```mermaid
 sequenceDiagram
     autonumber

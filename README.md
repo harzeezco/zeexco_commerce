@@ -141,6 +141,15 @@ login returns `403 EMAIL_VERIFICATION_REQUIRED` and durably queues or renews the
 verification email. No authentication session is created. Incorrect passwords
 continue to return the generic invalid-credentials response.
 
+## Background workers
+
+The API and background worker run as separate processes. `cmd/api` accepts HTTP
+traffic and durably records email and WhatsApp webhook work in PostgreSQL;
+`cmd/worker` polls and processes those jobs. In Docker Compose they run as the
+`api` and `worker` services from the same image, so a worker crash or restart
+does not terminate the API process. PostgreSQL leases and idempotency keys allow
+unfinished work to be reclaimed after restart.
+
 WhatsApp-first registration is intentionally separate. After validating the
 opaque onboarding token, the frontend calls
 `POST /api/v1/whatsapp/onboarding/register` with required `first_name`,

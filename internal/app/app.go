@@ -40,10 +40,8 @@ type authenticationRuntime struct {
 }
 
 type App struct {
-	handler     http.Handler
-	db          *pgxpool.Pool
-	worker      *whatsappingestion.Worker
-	emailWorker *emailverification.Worker
+	handler http.Handler
+	db      *pgxpool.Pool
 }
 
 func New(ctx context.Context) (*App, error) {
@@ -65,7 +63,7 @@ func New(ctx context.Context) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure authentication: %w", err)
 	}
-	emailRuntime, err := loadEmailVerificationRuntime(cfg)
+	emailRuntime, err := loadEmailVerificationCore(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("configure email verification: %w", err)
 	}
@@ -142,12 +140,6 @@ func New(ctx context.Context) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("initialize email verification: %w", err)
 	}
-	emailWorker, err := emailverification.NewWorker(emailRepository, emailRuntime.sender, emailRuntime.tokens, emailRuntime.worker)
-	if err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("initialize verification email worker: %w", err)
-	}
-	emailService.SetNotifier(emailWorker)
 	registrationRepository := authrepositories.NewRegistrationRepositoryWithVerificationTTL(pool, emailRuntime.ttl)
 	registerService, err := services.NewRegisterService(
 		registrationRepository,
@@ -157,7 +149,6 @@ func New(ctx context.Context) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("initialize registration: %w", err)
 	}
-	registerService.SetNotifier(emailWorker)
 
 	authController := controllers.NewAuthController(
 		registerService,
@@ -204,7 +195,6 @@ func New(ctx context.Context) (*App, error) {
 		authenticationMiddleware.Require(http.HandlerFunc(authenticationController.Me)),
 	)
 
-	var webhookWorker *whatsappingestion.Worker
 	if whatsAppWebhookEnabled || whatsAppFlowEnabled {
 		whatsappIdentityRepository := whatsapprepositories.NewWhatsAppIdentityRepository(pool)
 		identityResolver := identity.NewResolver(map[identity.Provider]identity.ProviderResolver{
@@ -293,41 +283,12 @@ func New(ctx context.Context) (*App, error) {
 		}
 
 		if whatsAppWebhookEnabled {
-			pollInterval, err := positiveDuration("WHATSAPP_WEBHOOK_WORKER_POLL_INTERVAL", cfg.WhatsAppWebhookWorkerPollInterval)
-			if err != nil {
-				pool.Close()
-				return nil, err
-			}
-			retryDelay, err := positiveDuration("WHATSAPP_WEBHOOK_RETRY_DELAY", cfg.WhatsAppWebhookRetryDelay)
-			if err != nil {
-				pool.Close()
-				return nil, err
-			}
-			processingLease, err := positiveDuration("WHATSAPP_WEBHOOK_PROCESSING_LEASE", cfg.WhatsAppWebhookProcessingLease)
-			if err != nil {
-				pool.Close()
-				return nil, err
-			}
-			maxAttempts, err := positiveInteger("WHATSAPP_WEBHOOK_MAX_ATTEMPTS", cfg.WhatsAppWebhookMaxAttempts)
-			if err != nil {
-				pool.Close()
-				return nil, err
-			}
-			webhookWorker, err = whatsappingestion.NewWorker(whatsappIngestionService, whatsappingestion.WorkerConfig{
-				PollInterval: pollInterval, RetryDelay: retryDelay, ProcessingLease: processingLease,
-				MaxAttempts: maxAttempts, Logger: log.Default(),
-			})
-			if err != nil {
-				pool.Close()
-				return nil, fmt.Errorf("configure WhatsApp webhook worker: %w", err)
-			}
 			whatsappWebhookController := whatsappcontrollers.NewWebhookController(
 				cfg.WhatsAppWebhookVerifyToken,
 				cfg.MetaAppSecret,
 				whatsappIngestionService,
 				log.Default(),
 			)
-			whatsappWebhookController.SetNotifier(webhookWorker)
 			mux.HandleFunc(whatsapproutes.VerifyWebhook, whatsappWebhookController.Verify)
 			mux.Handle(whatsapproutes.ReceiveWebhook, httpapi.RateLimit(
 				webhookLimiter, "whatsapp_webhook", metrics,
@@ -342,11 +303,7 @@ func New(ctx context.Context) (*App, error) {
 		return nil, fmt.Errorf("configure frontend CORS: %w", err)
 	}
 	handler = httpapi.RequestMiddleware(handler, metrics, log.Default())
-	if webhookWorker != nil {
-		webhookWorker.Start(ctx)
-	}
-	emailWorker.Start(ctx)
-	return &App{handler: handler, db: pool, worker: webhookWorker, emailWorker: emailWorker}, nil
+	return &App{handler: handler, db: pool}, nil
 
 }
 
@@ -355,6 +312,27 @@ type emailVerificationRuntime struct {
 	sender *emailverification.ResendClient
 	ttl    time.Duration
 	worker emailverification.WorkerConfig
+}
+
+type emailVerificationCore struct {
+	tokens *emailverification.TokenManager
+	ttl    time.Duration
+}
+
+func loadEmailVerificationCore(cfg config.Config) (emailVerificationCore, error) {
+	secret, err := decodeBase64Key(cfg.EmailVerificationHMACSecretBase64, "EMAIL_VERIFICATION_HMAC_SECRET_BASE64")
+	if err != nil {
+		return emailVerificationCore{}, err
+	}
+	tokens, err := emailverification.NewTokenManager(secret)
+	if err != nil {
+		return emailVerificationCore{}, err
+	}
+	ttl, err := positiveDuration("EMAIL_VERIFICATION_TTL", cfg.EmailVerificationTTL)
+	if err != nil {
+		return emailVerificationCore{}, err
+	}
+	return emailVerificationCore{tokens: tokens, ttl: ttl}, nil
 }
 
 func loadEmailVerificationRuntime(cfg config.Config) (emailVerificationRuntime, error) {
@@ -543,12 +521,6 @@ func normalizeHTTPOrigin(configuredOrigin string) (string, error) {
 }
 
 func (a *App) Close() {
-	if a.emailWorker != nil {
-		a.emailWorker.Close()
-	}
-	if a.worker != nil {
-		a.worker.Close()
-	}
 	a.db.Close()
 }
 
