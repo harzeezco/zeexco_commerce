@@ -83,6 +83,7 @@ func New(ctx context.Context) (*App, error) {
 			len(migrationReport.Applied), len(migrationReport.Baselined),
 		)
 	}
+
 	if migrationReport.LegacyActiveUsersWithoutPassword > 0 {
 		log.Printf(
 			"warning: %d legacy ACTIVE user(s) have no password hash and require explicit account remediation",

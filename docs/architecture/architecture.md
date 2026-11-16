@@ -1791,7 +1791,7 @@ sequenceDiagram
     API->>DB: Insert email verification + PENDING delivery job
     API->>DB: Insert audit events
     API->>DB: COMMIT
-    API-->>UI: 202 Accepted, next_step=VERIFY_EMAIL
+    API-->>UI: 202 Accepted, status_code + activation instructions message
 
     Worker->>DB: Claim due job (FOR UPDATE SKIP LOCKED)
     Worker->>Resend: POST /emails + stable Idempotency-Key

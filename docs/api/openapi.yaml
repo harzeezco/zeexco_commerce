@@ -124,7 +124,7 @@ paths:
           description: WhatsApp-first merchant registration was committed.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/RegisterResponse' }
+              schema: { $ref: '#/components/schemas/WhatsAppRegisterResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { description: Email, identity, or onboarding-token conflict. }
         '410': { description: The onboarding token has expired. }
@@ -233,9 +233,10 @@ paths:
       operationId: login
       summary: Authenticate with email and password
       description: >-
-        Returns a short-lived access token for in-memory use and sets the
-        rotating opaque refresh credential in an HttpOnly cookie. The refresh
-        token is never returned in JSON. Valid credentials for a pending account
+        Returns only status_code and message, and sets the rotating opaque
+        refresh credential in an HttpOnly cookie. Call the refresh endpoint
+        with that cookie to obtain an access token. No credentials, user, or
+        business details are returned in the login JSON. Valid credentials for a pending account
         queue or renew a durable verification email instead of creating a session.
       requestBody:
         required: true
@@ -251,7 +252,7 @@ paths:
               schema: { type: string }
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/AuthenticationResponse' }
+              schema: { $ref: '#/components/schemas/LoginResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/InvalidCredentials' }
         '403':
@@ -385,7 +386,18 @@ components:
         last_name: { type: string, minLength: 1, maxLength: 100 }
         business_name: { type: string, minLength: 1, maxLength: 200 }
         email: { type: string, format: email, maxLength: 255 }
-        password: { type: string, format: password, minLength: 12, maxLength: 72, writeOnly: true }
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          writeOnly: true
+          description: >-
+            Must contain at least one Unicode letter (uppercase or lowercase),
+            one decimal digit, and one punctuation or symbol character.
+            Spaces do not count as symbols. The server requires at least 8
+            characters and no more than 72 UTF-8 bytes for bcrypt compatibility;
+            passwords are not trimmed.
     WhatsAppRegisterRequest:
       type: object
       additionalProperties: false
@@ -403,6 +415,13 @@ components:
       properties:
         email: { type: string, format: email }
         password: { type: string, format: password, writeOnly: true }
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [status_code, message]
+      properties:
+        status_code: { type: integer, enum: [200] }
+        message: { type: string, example: Login successful. Welcome back }
     AuthenticationResponse:
       type: object
       required: [access_token, token_type, expires_in, user, businesses]
@@ -433,6 +452,15 @@ components:
         status: { type: string, enum: [ACTIVE, SUSPENDED] }
         membership_role: { type: string, enum: [OWNER, ADMIN, STAFF] }
     RegisterResponse:
+      type: object
+      additionalProperties: false
+      required: [status_code, message]
+      properties:
+        status_code: { type: integer, enum: [202] }
+        message:
+          type: string
+          example: Registration successful. Please check your email to activate your account.
+    WhatsAppRegisterResponse:
       type: object
       required: [user, business, next_step]
       properties:

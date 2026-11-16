@@ -17,31 +17,27 @@ import (
 	businessmodels "github.com/harzeezco/zeexco_commerce/internal/features/business/models"
 )
 
-func TestRegisterReturnsBusinessAndNextOnboardingStep(t *testing.T) {
+func TestRegisterReturnsOnlyStatusCodeAndMessage(t *testing.T) {
 	service := &fakeRegistrationService{registration: controllerTestRegistration()}
 	body := `{
 		"first_name":"Ada",
 		"last_name":"Lovelace",
 		"business_name":"Analytical Commerce",
 		"email":"ada@example.com",
-		"password":"correct horse battery staple"
+		"password":"correct horse battery staple1!"
 	}`
 	response := performRegistrationRequest(service, body)
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	var payload schemas.RegisterResponse
+	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.User.ID == "" || payload.Business.ID == "" ||
-		payload.User.Status != "PENDING" || payload.Business.Status != "ACTIVE" ||
-		payload.NextStep != services.NextStepVerifyEmail {
+	if len(payload) != 2 || string(payload["status_code"]) != "202" ||
+		string(payload["message"]) != `"Registration successful. Please check your email to activate your account."` {
 		t.Fatalf("response = %#v", payload)
-	}
-	if strings.Contains(response.Body.String(), "password") {
-		t.Fatalf("response contains password data: %s", response.Body.String())
 	}
 	if service.command.BusinessName != "Analytical Commerce" || service.command.Password == "" {
 		t.Fatalf("service command = %#v", service.command)
@@ -52,7 +48,7 @@ func TestWebRegisterRejectsWhatsAppOnboardingMode(t *testing.T) {
 	service := &fakeRegistrationService{}
 	response := performRegistrationRequest(service, `{
 		"first_name":"Ada","last_name":"Lovelace","business_name":"Commerce",
-		"email":"ada@example.com","password":"correct horse battery staple",
+		"email":"ada@example.com","password":"correct horse battery staple1!",
 		"onboarding_token":"token"
 	}`)
 	assertAPIError(t, response, http.StatusBadRequest, "INVALID_JSON")
@@ -65,7 +61,7 @@ func TestRegisterRejectsClientSuppliedWhatsAppIdentity(t *testing.T) {
 	service := &fakeRegistrationService{}
 	response := performRegistrationRequest(service, `{
 		"first_name":"Ada","last_name":"Lovelace","business_name":"Commerce",
-		"email":"ada@example.com","password":"correct horse battery staple",
+		"email":"ada@example.com","password":"correct horse battery staple1!",
 		"whatsapp_provider_user_id":"attacker-selected-id"
 	}`)
 	assertAPIError(t, response, http.StatusBadRequest, "INVALID_JSON")

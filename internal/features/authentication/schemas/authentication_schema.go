@@ -5,6 +5,11 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+type LoginResponse struct {
+	StatusCode int    `json:"status_code"`
+	Message    string `json:"message"`
+}
+
 type AuthenticationResponse struct {
 	AccessToken string                  `json:"access_token"`
 	TokenType   string                  `json:"token_type"`

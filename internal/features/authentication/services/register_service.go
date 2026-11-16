@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/harzeezco/zeexco_commerce/internal/features/authentication/models"
 )
 
 const (
-	NextStepAddFirstProduct = "ADD_FIRST_PRODUCT"
-	NextStepVerifyEmail     = "VERIFY_EMAIL"
-	minimumPasswordBytes    = 12
-	maximumPasswordBytes    = 72
+	NextStepAddFirstProduct   = "ADD_FIRST_PRODUCT"
+	NextStepVerifyEmail       = "VERIFY_EMAIL"
+	minimumPasswordCharacters = 8
+	maximumPasswordBytes      = 72
 )
 
 var (
@@ -142,11 +143,20 @@ func normalizeRegistration(command RegisterCommand) (RegisterCommand, error) {
 	if len(command.Email) > 255 || !validEmail(command.Email) {
 		return RegisterCommand{}, validationError("email", "email address is invalid")
 	}
-	if len(command.Password) < minimumPasswordBytes {
-		return RegisterCommand{}, validationError("password", "password must be at least 12 bytes")
+	if utf8.RuneCountInString(command.Password) < minimumPasswordCharacters {
+		return RegisterCommand{}, validationError("password", "Password must be at least 8 characters")
 	}
 	if len(command.Password) > maximumPasswordBytes {
-		return RegisterCommand{}, validationError("password", "password must be 72 bytes or fewer")
+		return RegisterCommand{}, validationError("password", "Password must be 72 bytes or fewer")
+	}
+	var hasLetter, hasNumber, hasSymbol bool
+	for _, character := range command.Password {
+		hasLetter = hasLetter || unicode.IsLetter(character)
+		hasNumber = hasNumber || unicode.IsDigit(character)
+		hasSymbol = hasSymbol || unicode.IsPunct(character) || unicode.IsSymbol(character)
+	}
+	if !hasLetter || !hasNumber || !hasSymbol {
+		return RegisterCommand{}, validationError("password", "Password must contain at least one letter (uppercase or lowercase), one number, and one symbol")
 	}
 
 	return command, nil

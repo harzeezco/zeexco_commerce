@@ -129,7 +129,7 @@ func (w *Worker) drain(ctx context.Context) {
 }
 
 func (w *Worker) deliver(ctx context.Context, job DeliveryJob, now time.Time) error {
-	email, err := w.render(job)
+	email, err := w.render(job, now)
 	if err != nil {
 		return err
 	}
@@ -142,7 +142,7 @@ func (w *Worker) deliver(ctx context.Context, job DeliveryJob, now time.Time) er
 	return w.repository.MarkSent(ctx, job.ID, providerID, now)
 }
 
-func (w *Worker) render(job DeliveryJob) (RenderedEmail, error) {
+func (w *Worker) render(job DeliveryJob, now time.Time) (RenderedEmail, error) {
 	switch job.JobType {
 	case JobTypeEmailVerification:
 		token, err := w.tokens.Mint(job.VerificationID, job.ExpiresAt)
@@ -153,7 +153,7 @@ func (w *Worker) render(job DeliveryJob) (RenderedEmail, error) {
 		if err != nil {
 			return RenderedEmail{}, err
 		}
-		return renderVerificationEmail(job.FirstName, link)
+		return renderVerificationEmail(job.FirstName, link, job.ExpiresAt, now)
 	case JobTypeWelcome:
 		return renderWelcomeEmail(job.FirstName, w.welcomeURL)
 	default:

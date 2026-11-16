@@ -21,7 +21,7 @@ func TestRegisterNormalizesHashesAndPersistsRegistration(t *testing.T) {
 		LastName:     " Lovelace ",
 		BusinessName: "  Analytical   Commerce ",
 		Email:        " ADA@Example.COM ",
-		Password:     "correct horse battery staple",
+		Password:     "correct horse battery staple1!",
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -38,7 +38,7 @@ func TestRegisterNormalizesHashesAndPersistsRegistration(t *testing.T) {
 	if repository.input.PasswordHash != hasher.hash || repository.input.PasswordHash == hasher.password {
 		t.Fatalf("password hash input = %q", repository.input.PasswordHash)
 	}
-	if hasher.password != "correct horse battery staple" {
+	if hasher.password != "correct horse battery staple1!" {
 		t.Fatal("password hasher did not receive exact password")
 	}
 }
@@ -55,8 +55,13 @@ func TestRegisterRejectsInvalidInputBeforeHashingOrPersistence(t *testing.T) {
 		{name: "empty business", mutate: func(c *RegisterCommand) { c.BusinessName = "" }, field: "business_name"},
 		{name: "long business", mutate: func(c *RegisterCommand) { c.BusinessName = strings.Repeat("b", 201) }, field: "business_name"},
 		{name: "invalid email", mutate: func(c *RegisterCommand) { c.Email = "not-an-email" }, field: "email"},
-		{name: "short password", mutate: func(c *RegisterCommand) { c.Password = "too-short" }, field: "password"},
+		{name: "short password", mutate: func(c *RegisterCommand) { c.Password = "abcde1!" }, field: "password"},
+		{name: "short multibyte password", mutate: func(c *RegisterCommand) { c.Password = "éééé1!" }, field: "password"},
 		{name: "long password", mutate: func(c *RegisterCommand) { c.Password = strings.Repeat("p", 73) }, field: "password"},
+		{name: "missing number", mutate: func(c *RegisterCommand) { c.Password = "lettersand!symbols" }, field: "password"},
+		{name: "missing symbol", mutate: func(c *RegisterCommand) { c.Password = "lettersand12345" }, field: "password"},
+		{name: "missing letter", mutate: func(c *RegisterCommand) { c.Password = "123456789012!" }, field: "password"},
+		{name: "space is not a symbol", mutate: func(c *RegisterCommand) { c.Password = "letters 123456" }, field: "password"},
 	}
 
 	for _, test := range tests {
@@ -74,6 +79,26 @@ func TestRegisterRejectsInvalidInputBeforeHashingOrPersistence(t *testing.T) {
 			}
 			if hasher.calls != 0 || repository.calls != 0 {
 				t.Fatalf("hasher calls = %d, repository calls = %d", hasher.calls, repository.calls)
+			}
+		})
+	}
+}
+
+func TestRegisterAcceptsEitherLetterCaseAndPreservesPassword(t *testing.T) {
+	for _, password := range []string{
+		"lowercase123!", "UPPERCASE123!", "MixedCase123!", "  lowercase123!  ",
+		"abcdef1!", "ABCDEF1!", "éééééé1!", strings.Repeat("a", 70) + "1!", "ééééé123!",
+	} {
+		t.Run(password, func(t *testing.T) {
+			repository := &fakeRegistrationRepository{registration: testRegistration()}
+			hasher := &fakePasswordHasher{hash: "hash"}
+			command := validRegisterCommand()
+			command.Password = password
+			if _, err := newTestRegisterService(t, repository, hasher).Register(context.Background(), command); err != nil {
+				t.Fatalf("valid password rejected: %v", err)
+			}
+			if hasher.password != password || repository.calls != 1 {
+				t.Fatal("password was changed or registration was not persisted")
 			}
 		})
 	}
@@ -115,7 +140,7 @@ func newTestRegisterService(t *testing.T, repository RegistrationRepository, has
 func validRegisterCommand() RegisterCommand {
 	return RegisterCommand{
 		FirstName: "Ada", LastName: "Lovelace", BusinessName: "Analytical Commerce",
-		Email: "ada@example.com", Password: "correct horse battery staple",
+		Email: "ada@example.com", Password: "correct horse battery staple1!",
 	}
 }
 

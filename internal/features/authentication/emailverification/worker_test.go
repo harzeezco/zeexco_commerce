@@ -126,9 +126,9 @@ func TestWorkerRendersWelcomeEmailForLifecycleSender(t *testing.T) {
 		t.Fatal(err)
 	}
 	email := sender.emails[0]
-	if email.purpose != EmailPurposeLifecycle || email.subject != "Welcome to Zeexco" ||
+	if email.purpose != EmailPurposeLifecycle || email.subject != "Welcome to Zico" ||
 		!strings.Contains(email.html, "http://localhost:3000/login") ||
-		!strings.Contains(email.text, "Your account is ready") || repository.sentID != "email_123" {
+		!strings.Contains(email.text, "Your account is active") || repository.sentID != "email_123" {
 		t.Fatalf("email=%#v repository=%#v", email, repository)
 	}
 }

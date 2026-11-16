@@ -3,6 +3,7 @@ package emailverification
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,10 +110,17 @@ func (c *ResendClient) Send(
 	if err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(map[string]any{
+	message := map[string]any{
 		"from": from, "to": []string{to}, "subject": subject,
 		"html": htmlBody, "text": textBody,
-	})
+	}
+	if strings.Contains(htmlBody, "cid:"+zicoLogoContentID) {
+		message["attachments"] = []map[string]string{{
+			"filename": "zico-logo.png", "content_type": "image/png",
+			"content_id": zicoLogoContentID, "content": base64.StdEncoding.EncodeToString(zicoLogo),
+		}}
+	}
+	payload, err := json.Marshal(message)
 	if err != nil {
 		return "", fmt.Errorf("encode Resend email: %w", err)
 	}

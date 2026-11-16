@@ -100,7 +100,7 @@ func (c *Controller) RegisterAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registration := completion.Registration
-	writeAPIJSON(w, http.StatusCreated, authschemas.RegisterResponse{
+	writeAPIJSON(w, http.StatusCreated, authschemas.WhatsAppRegisterResponse{
 		User: authschemas.RegisteredUser{
 			ID: registration.User.ID, FirstName: registration.User.FirstName,
 			LastName: registration.User.LastName, Email: registration.User.Email,

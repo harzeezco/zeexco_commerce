@@ -57,8 +57,9 @@ func (c *AuthenticationController) Login(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "email or password is invalid", "")
 		return
 	}
+
 	if errors.Is(err, services.ErrEmailVerificationRequired) {
-		writeError(w, http.StatusForbidden, "EMAIL_VERIFICATION_REQUIRED", "account is pending verification; a verification email has been queued", "")
+		writeError(w, http.StatusForbidden, "EMAIL_VERIFICATION_REQUIRED", "Account is pending verification. Please check your email to activate your account.", "")
 		return
 	}
 
@@ -69,7 +70,10 @@ func (c *AuthenticationController) Login(w http.ResponseWriter, r *http.Request)
 
 	c.setRefreshCookie(w, result.RefreshToken)
 	setAuthenticationCacheHeaders(w)
-	writeJSON(w, http.StatusOK, authenticationResponse(result))
+	writeJSON(w, http.StatusOK, schemas.LoginResponse{
+		StatusCode: http.StatusOK,
+		Message:    "Login successful. Welcome back",
+	})
 }
 
 func (c *AuthenticationController) Refresh(w http.ResponseWriter, r *http.Request) {

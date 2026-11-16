@@ -36,11 +36,11 @@ func TestAuthenticationControllerLoginSetsSecureRefreshCookie(t *testing.T) {
 	if bytes.Contains(response.Body.Bytes(), []byte("new-refresh")) {
 		t.Fatal("response body exposed refresh token")
 	}
-	var payload schemas.AuthenticationResponse
+	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.AccessToken != "access-token" || payload.TokenType != "Bearer" || len(payload.Businesses) != 1 {
+	if len(payload) != 2 || string(payload["status_code"]) != "200" || string(payload["message"]) != `"Login successful. Welcome back"` {
 		t.Fatalf("payload=%#v", payload)
 	}
 }
@@ -75,6 +75,13 @@ func TestAuthenticationControllerRefreshRotatesCookieAndRejectsInvalid(t *testin
 	}
 	if cookies := response.Result().Cookies(); len(cookies) != 1 || cookies[0].Value != "replacement-refresh" {
 		t.Fatalf("cookies=%#v", cookies)
+	}
+	var payload schemas.AuthenticationResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode refresh response: %v", err)
+	}
+	if payload.AccessToken != "access-token" || payload.TokenType != "Bearer" || len(payload.Businesses) != 1 {
+		t.Fatalf("refresh payload=%#v", payload)
 	}
 
 	service.refreshErr = services.ErrInvalidRefresh

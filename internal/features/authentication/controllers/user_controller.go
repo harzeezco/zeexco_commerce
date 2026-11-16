@@ -45,7 +45,7 @@ func (c *AuthController) Register(w http.ResponseWriter, r *http.Request) {
 		Email:        request.Email,
 		Password:     request.Password,
 	}
-	registration, err := c.registerService.Register(r.Context(), command)
+	_, err = c.registerService.Register(r.Context(), command)
 	if err != nil {
 		var validationError *services.ValidationError
 		switch {
@@ -60,19 +60,8 @@ func (c *AuthController) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, schemas.RegisterResponse{
-		User: schemas.RegisteredUser{
-			ID:        registration.User.ID,
-			FirstName: registration.User.FirstName,
-			LastName:  registration.User.LastName,
-			Email:     registration.User.Email,
-			Status:    string(registration.User.Status),
-		},
-		Business: schemas.RegisteredBusiness{
-			ID:     registration.Business.ID,
-			Name:   registration.Business.Name,
-			Status: string(registration.Business.Status),
-		},
-		NextStep: services.NextStepVerifyEmail,
+		StatusCode: http.StatusAccepted,
+		Message:    "Registration successful. Please check your email to activate your account.",
 	})
 }
 

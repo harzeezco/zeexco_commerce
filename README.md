@@ -44,6 +44,18 @@ count.
 the API container starts. Rebuilding an image alone does not alter the database;
 the migration runs when the rebuilt API starts.
 
+The Dockerfile compiles the API, worker, embedded email assets, and migrations
+into the image. Compose has no source mount or file watcher, so local edits do
+not update running containers. After source changes, rebuild and recreate only
+the application services:
+
+```powershell
+docker compose up -d --build api worker
+```
+
+`docker compose restart` runs the existing image and does not compile changes.
+PostgreSQL does not need to be restarted for application code changes.
+
 For databases created before migration tracking existed, the runner validates
 the known legacy tables, columns, constraints, and indexes before recording
 their historical versions. It then applies only pending migrations. A partially
@@ -102,18 +114,31 @@ delivery job. Email is normalized to lowercase, uniqueness is enforced by
 PostgreSQL, and passwords are stored only as bcrypt hashes. The account cannot
 log in until the email address is verified.
 
+Passwords must contain a letter (uppercase or lowercase), a number, and a
+symbol. Spaces do not count as symbols. Passwords must be at least 8 characters
+and no more than 72 UTF-8 bytes, and are preserved exactly as entered.
+
 ```json
 {
   "first_name": "Ada",
   "last_name": "Lovelace",
   "business_name": "Analytical Commerce",
   "email": "ada@example.com",
-  "password": "correct horse battery staple"
+  "password": "correct horse battery staple1!"
 }
 ```
 
-The `202 Accepted` response contains the pending user, business, and
-`"next_step":"VERIFY_EMAIL"`. A database-backed worker sends the activation
+The `202 Accepted` response returns only a status code and message, without
+user details, business details, or onboarding metadata:
+
+```json
+{
+  "status_code": 202,
+  "message": "Registration successful. Please check your email to activate your account."
+}
+```
+
+A database-backed worker sends the activation
 message through Resend from the configured security sender outside the request
 path. Failed and interrupted jobs are retried with exponential backoff; Resend
 receives a stable idempotency key so retries do not intentionally duplicate
@@ -166,9 +191,13 @@ JWTs must never be placed directly in WhatsApp CTA URLs.
 
 ## Browser authentication
 
-`POST /api/v1/auth/login` accepts email and password. It returns the short-lived
-access JWT in JSON and sets the opaque refresh credential only as an HttpOnly
-cookie. The frontend should keep the access token in memory and send it as
+`POST /api/v1/auth/login` accepts email and password. It returns only
+`{"status_code":200,"message":"Login successful. Welcome back"}` and sets the opaque refresh
+credential as an HttpOnly cookie. User details, business details, and tokens
+are not included in the login JSON. After login, call
+`POST /api/v1/auth/refresh` with that cookie to obtain an access JWT and user
+context. Browser requests must include credentials so the cookie is stored
+and sent. The frontend should keep the access token in memory and send it as
 `Authorization: Bearer <token>`; it should not put either credential in
 `localStorage`. `POST /api/v1/auth/refresh` rotates the cookie and returns a new
 access JWT. `GET /api/v1/auth/me` requires the Bearer token and returns the user
@@ -362,7 +391,7 @@ Configure these values in addition to the existing webhook and Cloud API
 credentials:
 
 ```powershell
-$env:PUBLIC_FRONTEND_BASE_URL = "https://www.zeexco.com"
+$env:PUBLIC_FRONTEND_BASE_URL = "http://localhost:3000"
 $env:WHATSAPP_ONBOARDING_RETURN_URL = "https://wa.me/"
 $env:WHATSAPP_ONBOARDING_TOKEN_TTL = "30m"
 $env:WHATSAPP_MERCHANT_REGISTRATION_FLOW_ID = "<published-meta-flow-id>"
@@ -376,8 +405,8 @@ that owns the configured ID and keep its endpoint set to
 `POST /api/v1/whatsapp/flows`. The Flow ID is environment-specific and must not
 be hardcoded. Leave it blank to force browser fallback.
 
-The public frontend base URL and return URL must be absolute HTTPS URLs. The
-frontend origin is also the exact CORS allow-origin. Leaving it unset disables
+The public frontend base URL must be an absolute HTTPS URL, or HTTP localhost
+for development. The frontend origin is also the exact CORS allow-origin. Leaving it unset disables
 onboarding while preserving browser auth and inbound webhook processing. The
 API automatically applies migrations through `000009`
 on startup. To apply it explicitly:

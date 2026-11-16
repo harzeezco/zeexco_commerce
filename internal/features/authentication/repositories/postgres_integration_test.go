@@ -480,7 +480,7 @@ func postgresRegisterService(t *testing.T, pool *pgxpool.Pool, hasher services.P
 	return service
 }
 
-const integrationPassword = "correct horse battery staple"
+const integrationPassword = "correct horse battery staple1!"
 
 func integrationRegisterCommand(email string) services.RegisterCommand {
 	return services.RegisterCommand{

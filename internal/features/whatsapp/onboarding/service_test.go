@@ -43,6 +43,27 @@ func TestUnknownSenderStartsOneOnboardingAndSendsHTTPSCTA(t *testing.T) {
 	}
 }
 
+func TestNewServiceAllowsHTTPDevelopmentLocalhost(t *testing.T) {
+	service, err := NewService(&fakeSessionRepository{}, &fakeSender{}, ServiceConfig{
+		PublicBaseURL: "http://localhost:3000", ReturnURL: "https://wa.me/", TokenTTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewService() rejected localhost development URL: %v", err)
+	}
+	if service.publicBaseURL != "http://localhost:3000" {
+		t.Fatalf("public base URL=%q", service.publicBaseURL)
+	}
+}
+
+func TestNewServiceRejectsNonLocalHTTPOnboardingURL(t *testing.T) {
+	_, err := NewService(&fakeSessionRepository{}, &fakeSender{}, ServiceConfig{
+		PublicBaseURL: "http://commerce.example", ReturnURL: "https://wa.me/", TokenTTL: time.Hour,
+	})
+	if err == nil {
+		t.Fatal("NewService() accepted a non-local HTTP URL")
+	}
+}
+
 func TestUnknownSenderLaunchesRegistrationFlowWithOpaqueToken(t *testing.T) {
 	repository := &fakeSessionRepository{sendWelcome: true}
 	sender := &fakeSender{}

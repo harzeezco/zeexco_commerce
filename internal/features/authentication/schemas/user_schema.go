@@ -9,6 +9,11 @@ type RegisterRequest struct {
 }
 
 type RegisterResponse struct {
+	StatusCode int    `json:"status_code"`
+	Message    string `json:"message"`
+}
+
+type WhatsAppRegisterResponse struct {
 	User     RegisteredUser     `json:"user"`
 	Business RegisteredBusiness `json:"business"`
 	NextStep string             `json:"next_step"`

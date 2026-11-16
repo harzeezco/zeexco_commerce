@@ -72,13 +72,13 @@ func NewService(repository SessionRepository, sender MessageSender, cfg ServiceC
 	if repository == nil || sender == nil {
 		return nil, errors.New("onboarding repository and sender are required")
 	}
-	baseURL, err := validateHTTPSURL(cfg.PublicBaseURL)
+	baseURL, err := validatePublicOnboardingURL(cfg.PublicBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("public onboarding URL: %w", err)
 	}
 	parsedBaseURL, _ := url.Parse(baseURL)
 	if (parsedBaseURL.Path != "" && parsedBaseURL.Path != "/") || parsedBaseURL.RawQuery != "" {
-		return nil, errors.New("public onboarding URL must be an HTTPS origin without path or query")
+		return nil, errors.New("public onboarding URL must be an HTTP(S) origin without path or query")
 	}
 	returnURL, err := validateHTTPSURL(cfg.ReturnURL)
 	if err != nil {
@@ -323,4 +323,19 @@ func validateHTTPSURL(value string) (string, error) {
 		return "", errors.New("must be an absolute HTTPS URL without credentials or fragment")
 	}
 	return parsed.String(), nil
+}
+
+func validatePublicOnboardingURL(value string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", errors.New("must be an absolute HTTPS URL, or HTTP localhost URL, without credentials or fragment")
+	}
+	if parsed.Scheme == "https" {
+		return parsed.String(), nil
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+		return parsed.String(), nil
+	}
+	return "", errors.New("must be an absolute HTTPS URL, or HTTP localhost URL, without credentials or fragment")
 }

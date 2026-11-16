@@ -1,7 +1,9 @@
 package emailverification
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +17,28 @@ func TestResendClientUsesPurposeSenderAndStableIdempotency(t *testing.T) {
 			t.Fatalf("request path=%s headers=%v", r.URL.Path, r.Header)
 		}
 		var payload struct {
-			From string   `json:"from"`
-			To   []string `json:"to"`
+			From        string   `json:"from"`
+			To          []string `json:"to"`
+			Attachments []struct {
+				Content     string `json:"content"`
+				ContentID   string `json:"content_id"`
+				ContentType string `json:"content_type"`
+			} `json:"attachments"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || len(payload.To) != 1 || payload.To[0] != "ada@example.com" {
 			t.Fatalf("payload=%#v error=%v", payload, err)
+		}
+		if len(fromValues) == 0 {
+			if len(payload.Attachments) != 1 {
+				t.Fatalf("inline attachments=%d, want 1", len(payload.Attachments))
+			}
+			attachment := payload.Attachments[0]
+			logo, err := base64.StdEncoding.DecodeString(attachment.Content)
+			if err != nil || !bytes.Equal(logo, zicoLogo) || attachment.ContentID != zicoLogoContentID || attachment.ContentType != "image/png" {
+				t.Fatal("inline logo attachment is invalid")
+			}
+		} else if len(payload.Attachments) != 0 {
+			t.Fatal("email without a logo reference received an attachment")
 		}
 		fromValues = append(fromValues, payload.From)
 		idempotencyValues = append(idempotencyValues, r.Header.Get("Idempotency-Key"))
@@ -36,7 +55,7 @@ func TestResendClientUsesPurposeSenderAndStableIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := client.Send(context.Background(), "job-1", EmailPurposeSecurity, "ada@example.com", "Verify", "<p>Verify</p>", "Verify")
+	id, err := client.Send(context.Background(), "job-1", EmailPurposeSecurity, "ada@example.com", "Verify", `<img src="cid:zico-logo" alt="Zico">`, "Verify")
 	if err != nil || id != "email_123" {
 		t.Fatalf("id=%q error=%v", id, err)
 	}
