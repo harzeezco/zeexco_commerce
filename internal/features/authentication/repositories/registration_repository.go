@@ -17,7 +17,7 @@ const (
 	auditEventUserRegistered        = "USER_REGISTERED"
 	auditEventBusinessCreated       = "BUSINESS_CREATED"
 	auditEventVerificationRequested = "EMAIL_VERIFICATION_REQUESTED"
-	defaultEmailVerificationTTL     = 24 * time.Hour
+	defaultEmailVerificationTTL     = 10 * time.Minute
 )
 
 type RegistrationRepository struct {

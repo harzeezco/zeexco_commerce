@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/harzeezco/zeexco_commerce/internal/features/authentication/models"
+	"github.com/harzeezco/zeexco_commerce/internal/platform/httpapi"
 )
 
 type AccessTokenVerifier interface {
@@ -17,15 +18,38 @@ type principalContextKey struct{}
 
 type Authentication struct {
 	verifier AccessTokenVerifier
+	cookie   CookieAuthenticationConfig
 }
 
-func NewAuthentication(verifier AccessTokenVerifier) *Authentication {
-	return &Authentication{verifier: verifier}
+type CookieAuthenticationConfig struct {
+	Name          string
+	AllowedOrigin string
+}
+
+func NewAuthentication(verifier AccessTokenVerifier, config ...CookieAuthenticationConfig) *Authentication {
+	cookie := CookieAuthenticationConfig{Name: "zeexco_access"}
+	if len(config) > 0 {
+		cookie = config[0]
+	}
+	return &Authentication{verifier: verifier, cookie: cookie}
 }
 
 func (m *Authentication) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
 		rawToken, ok := bearerToken(r)
+		cookieCount := 0
+		for _, cookie := range r.Cookies() {
+			if cookie.Name == m.cookie.Name {
+				cookieCount++
+				rawToken, ok = cookie.Value, cookie.Value != ""
+			}
+		}
+		if cookieCount > 1 {
+			writeUnauthorized(w)
+			return
+		}
 		if !ok || m.verifier == nil {
 			writeUnauthorized(w)
 			return
@@ -36,6 +60,10 @@ func (m *Authentication) Require(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), principalContextKey{}, principal)
+		if cookieCount == 1 && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			httpapi.RequireOrigin(m.cookie.AllowedOrigin, next).ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

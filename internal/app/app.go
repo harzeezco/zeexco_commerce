@@ -36,7 +36,7 @@ import (
 type authenticationRuntime struct {
 	tokens     *security.AccessTokenManager
 	refreshTTL time.Duration
-	cookie     controllers.RefreshCookieConfig
+	cookie     controllers.SessionCookieConfig
 }
 
 type App struct {
@@ -170,7 +170,9 @@ func New(ctx context.Context) (*App, error) {
 		authenticationService,
 		authRuntime.cookie,
 	)
-	authenticationMiddleware := authmiddleware.NewAuthentication(authRuntime.tokens)
+	authenticationMiddleware := authmiddleware.NewAuthentication(authRuntime.tokens, authmiddleware.CookieAuthenticationConfig{
+		Name: authRuntime.cookie.AccessName, AllowedOrigin: allowedOrigin,
+	})
 
 	mux.Handle(routes.RegisterUser, httpapi.RateLimit(
 		registerLimiter, "register", metrics,
@@ -182,7 +184,7 @@ func New(ctx context.Context) (*App, error) {
 	))
 	mux.Handle(routes.LoginUser, httpapi.RateLimit(
 		httpapi.NewLimiter(loginLimit, rateLimitWindow), "login", metrics,
-		http.HandlerFunc(authenticationController.Login),
+		httpapi.RequireOrigin(allowedOrigin, http.HandlerFunc(authenticationController.Login)),
 	))
 	mux.Handle(routes.RefreshUser, httpapi.RateLimit(
 		httpapi.NewLimiter(refreshLimit, rateLimitWindow), "refresh", metrics,
@@ -194,6 +196,10 @@ func New(ctx context.Context) (*App, error) {
 	mux.Handle(
 		routes.CurrentUser,
 		authenticationMiddleware.Require(http.HandlerFunc(authenticationController.Me)),
+	)
+	mux.Handle(
+		routes.Session,
+		authenticationMiddleware.Require(http.HandlerFunc(authenticationController.Session)),
 	)
 
 	if whatsAppWebhookEnabled || whatsAppFlowEnabled {
@@ -405,6 +411,19 @@ func loadAuthenticationRuntime(cfg config.Config) (authenticationRuntime, error)
 	if strings.TrimSpace(cfg.AuthRefreshCookieName) == "" {
 		return authenticationRuntime{}, errors.New("AUTH_REFRESH_COOKIE_NAME is required")
 	}
+	accessName := strings.TrimSpace(cfg.AuthAccessCookieName)
+	if accessName == "" {
+		accessName = "zeexco_access"
+	}
+	refreshName := strings.TrimSpace(cfg.AuthRefreshCookieName)
+	if accessName == refreshName {
+		return authenticationRuntime{}, errors.New("access and refresh cookie names must differ")
+	}
+	for _, name := range []string{accessName, refreshName} {
+		if err := (&http.Cookie{Name: name}).Valid(); err != nil {
+			return authenticationRuntime{}, fmt.Errorf("invalid authentication cookie name: %w", err)
+		}
+	}
 	tokens, err := security.NewAccessTokenManager(
 		privateKey, publicKey, cfg.AuthJWTIssuer, cfg.AuthJWTAudience, accessTTL,
 	)
@@ -414,8 +433,9 @@ func loadAuthenticationRuntime(cfg config.Config) (authenticationRuntime, error)
 	return authenticationRuntime{
 		tokens:     tokens,
 		refreshTTL: refreshTTL,
-		cookie: controllers.RefreshCookieConfig{
-			Name: strings.TrimSpace(cfg.AuthRefreshCookieName), Path: "/api/v1/auth",
+		cookie: controllers.SessionCookieConfig{
+			AccessName: accessName,
+			Name:       strings.TrimSpace(cfg.AuthRefreshCookieName), Path: "/api/v1/auth",
 			Domain: cfg.AuthRefreshCookieDomain, Secure: secure,
 			SameSite: sameSite, Lifetime: refreshTTL,
 		},

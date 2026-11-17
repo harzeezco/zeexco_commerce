@@ -21,13 +21,15 @@ func TestLoadReadsWhatsAppOutboundConfiguration(t *testing.T) {
 }
 
 func TestLoadUsesSafeAuthenticationDefaults(t *testing.T) {
+	t.Setenv("EMAIL_VERIFICATION_TTL", "")
 	t.Setenv("AUTH_ACCESS_TOKEN_TTL", "")
+	t.Setenv("AUTH_ACCESS_COOKIE_NAME", "")
 	t.Setenv("AUTH_REFRESH_TOKEN_TTL", "")
 	t.Setenv("AUTH_REFRESH_COOKIE_SECURE", "")
 	t.Setenv("AUTH_REFRESH_COOKIE_SAME_SITE", "")
 	cfg := Load()
 	if cfg.AuthAccessTokenTTL != "15m" || cfg.AuthRefreshTokenTTL != "720h" ||
-		cfg.AuthRefreshCookieSecure != "true" || cfg.AuthRefreshCookieSameSite != "Lax" {
+		cfg.AuthRefreshCookieSecure != "true" || cfg.AuthRefreshCookieSameSite != "Lax" || cfg.AuthAccessCookieName != "zeexco_access" || cfg.EmailVerificationTTL != "10m" {
 		t.Fatalf("authentication defaults = %#v", cfg)
 	}
 }

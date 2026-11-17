@@ -65,7 +65,7 @@ func TestLoadAuthenticationRuntimeUsesSafeDefaultsAndMatchingKeys(t *testing.T) 
 		t.Fatalf("loadAuthenticationRuntime() error = %v", err)
 	}
 	if runtime.tokens.Lifetime() != 15*time.Minute || runtime.refreshTTL != 30*24*time.Hour ||
-		!runtime.cookie.Secure || runtime.cookie.SameSite != http.SameSiteLaxMode {
+		!runtime.cookie.Secure || runtime.cookie.SameSite != http.SameSiteLaxMode || runtime.cookie.AccessName != "zeexco_access" {
 		t.Fatalf("runtime = %#v", runtime)
 	}
 }
@@ -84,6 +84,27 @@ func TestLoadAuthenticationRuntimeFailsClosed(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("loadAuthenticationRuntime() accepted insecure SameSite=None cookie")
+	}
+}
+
+func TestAuthenticationCookieNamesMustBeValidAndDistinct(t *testing.T) {
+	privateValue, publicValue := testAuthenticationKeys(t)
+	for _, name := range []string{"zeexco_refresh", "invalid cookie", "custom_access"} {
+		cfg := config.Config{
+			AuthJWTPrivateKeyBase64: privateValue, AuthJWTPublicKeyBase64: publicValue,
+			AuthJWTIssuer: "zeexco", AuthJWTAudience: "zeexco-api",
+			AuthAccessTokenTTL: "15m", AuthRefreshTokenTTL: "720h",
+			AuthRefreshCookieName: "zeexco_refresh", AuthAccessCookieName: name,
+			AuthRefreshCookieSecure: "true", AuthRefreshCookieSameSite: "Lax",
+		}
+		runtime, err := loadAuthenticationRuntime(cfg)
+		if name == "custom_access" {
+			if err != nil || runtime.cookie.AccessName != name {
+				t.Fatal("custom access cookie name was not applied")
+			}
+		} else if err == nil {
+			t.Fatalf("invalid or conflicting cookie name %q accepted", name)
+		}
 	}
 }
 

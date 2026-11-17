@@ -10,15 +10,14 @@ type LoginResponse struct {
 	Message    string `json:"message"`
 }
 
-type AuthenticationResponse struct {
-	AccessToken string                  `json:"access_token"`
-	TokenType   string                  `json:"token_type"`
-	ExpiresIn   int64                   `json:"expires_in"`
-	User        RegisteredUser          `json:"user"`
-	Businesses  []AuthenticatedBusiness `json:"businesses"`
+type MeResponse struct {
+	User       RegisteredUser          `json:"user"`
+	Businesses []AuthenticatedBusiness `json:"businesses"`
 }
 
-type MeResponse struct {
+type SessionResponse struct {
+	StatusCode int                     `json:"status_code"`
+	Message    string                  `json:"message"`
 	User       RegisteredUser          `json:"user"`
 	Businesses []AuthenticatedBusiness `json:"businesses"`
 }

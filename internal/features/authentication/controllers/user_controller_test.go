@@ -27,6 +27,9 @@ func TestRegisterReturnsOnlyStatusCodeAndMessage(t *testing.T) {
 		"password":"correct horse battery staple1!"
 	}`
 	response := performRegistrationRequest(service, body)
+	if len(response.Result().Cookies()) != 0 {
+		t.Fatal("pending registration must not create an authenticated session")
+	}
 
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())

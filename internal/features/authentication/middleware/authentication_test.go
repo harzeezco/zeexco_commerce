@@ -27,6 +27,48 @@ func TestAuthenticationMiddlewareCreatesPrincipal(t *testing.T) {
 	}
 }
 
+func TestCookieAuthenticationAndCSRF(t *testing.T) {
+	for _, test := range []struct {
+		name, method, origin string
+		cookies              []string
+		verifyErr            error
+		wantStatus           int
+	}{
+		{"read with cookie", "GET", "", []string{"valid-token"}, nil, 204},
+		{"write trusted origin", "POST", "https://app.example", []string{"valid-token"}, nil, 204},
+		{"write missing origin", "POST", "", []string{"valid-token"}, nil, 403},
+		{"write hostile origin", "POST", "https://attacker.example", []string{"valid-token"}, nil, 403},
+		{"write similar origin", "POST", "https://app.example.attacker.example", []string{"valid-token"}, nil, 403},
+		{"empty cookie", "GET", "", []string{""}, nil, 401},
+		{"invalid or expired cookie", "GET", "", []string{"expired"}, errors.New("expired"), 401},
+		{"duplicate cookies", "GET", "", []string{"one", "two"}, nil, 401},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verifier := &fakeVerifier{principal: models.Principal{UserID: testMiddlewareUserID}, err: test.verifyErr}
+			handler := NewAuthentication(verifier, CookieAuthenticationConfig{Name: "custom_access", AllowedOrigin: "https://app.example"}).Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, ok := PrincipalFromContext(r.Context()); !ok {
+					t.Fatal("missing principal")
+				}
+				w.WriteHeader(204)
+			}))
+			request := httptest.NewRequest(test.method, "/protected", nil)
+			request.Header.Set("Origin", test.origin)
+			request.Header.Set("Authorization", "Bearer fallback-must-not-override-cookie")
+			for _, value := range test.cookies {
+				request.AddCookie(&http.Cookie{Name: "custom_access", Value: value})
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d, want %d", response.Code, test.wantStatus)
+			}
+			if response.Code == 204 && verifier.raw != "valid-token" {
+				t.Fatal("access cookie was not verified")
+			}
+		})
+	}
+}
+
 func TestAuthenticationMiddlewareRejectsMissingMalformedAndInvalidBearer(t *testing.T) {
 	tests := []struct {
 		name   string

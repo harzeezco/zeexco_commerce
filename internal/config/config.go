@@ -25,6 +25,7 @@ type Config struct {
 	AuthAccessTokenTTL                 string
 	AuthRefreshTokenTTL                string
 	AuthRefreshCookieName              string
+	AuthAccessCookieName               string
 	AuthRefreshCookieDomain            string
 	AuthRefreshCookieSecure            string
 	AuthRefreshCookieSameSite          string
@@ -79,6 +80,7 @@ func Load() Config {
 		AuthAccessTokenTTL:                 getEnv("AUTH_ACCESS_TOKEN_TTL", "15m"),
 		AuthRefreshTokenTTL:                getEnv("AUTH_REFRESH_TOKEN_TTL", "720h"),
 		AuthRefreshCookieName:              getEnv("AUTH_REFRESH_COOKIE_NAME", "zeexco_refresh"),
+		AuthAccessCookieName:               getEnv("AUTH_ACCESS_COOKIE_NAME", "zeexco_access"),
 		AuthRefreshCookieDomain:            os.Getenv("AUTH_REFRESH_COOKIE_DOMAIN"),
 		AuthRefreshCookieSecure:            getEnv("AUTH_REFRESH_COOKIE_SECURE", "true"),
 		AuthRefreshCookieSameSite:          getEnv("AUTH_REFRESH_COOKIE_SAME_SITE", "Lax"),
@@ -103,7 +105,7 @@ func Load() Config {
 		ResendAPIBaseURL:                   getEnv("RESEND_API_BASE_URL", "https://api.resend.com"),
 		EmailVerificationFrontendURL:       os.Getenv("EMAIL_VERIFICATION_FRONTEND_URL"),
 		EmailVerificationHMACSecretBase64:  os.Getenv("EMAIL_VERIFICATION_HMAC_SECRET_BASE64"),
-		EmailVerificationTTL:               getEnv("EMAIL_VERIFICATION_TTL", "24h"),
+		EmailVerificationTTL:               getEnv("EMAIL_VERIFICATION_TTL", "10m"),
 		EmailWorkerPollInterval:            getEnv("EMAIL_WORKER_POLL_INTERVAL", "250ms"),
 		EmailWorkerRetryBaseDelay:          getEnv("EMAIL_WORKER_RETRY_BASE_DELAY", "30s"),
 		EmailWorkerProcessingLease:         getEnv("EMAIL_WORKER_PROCESSING_LEASE", "5m"),

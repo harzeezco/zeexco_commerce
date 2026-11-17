@@ -144,6 +144,11 @@ path. Failed and interrupted jobs are retried with exponential backoff; Resend
 receives a stable idempotency key so retries do not intentionally duplicate
 mail.
 
+New activation links expire after 10 minutes by default
+(`EMAIL_VERIFICATION_TTL=10m`). The email displays the actual remaining lifetime
+in minutes. An explicit environment setting overrides the default; changing
+this setting does not change links that were already issued.
+
 The activation page reads the signed `token` query parameter and sends
 `{"token":"..."}` to `POST /api/v1/auth/verify-email`. A valid, unexpired,
 single-use token atomically changes the user to `ACTIVE` and queues one welcome
@@ -192,26 +197,57 @@ JWTs must never be placed directly in WhatsApp CTA URLs.
 ## Browser authentication
 
 `POST /api/v1/auth/login` accepts email and password. It returns only
-`{"status_code":200,"message":"Login successful. Welcome back"}` and sets the opaque refresh
-credential as an HttpOnly cookie. User details, business details, and tokens
-are not included in the login JSON. After login, call
-`POST /api/v1/auth/refresh` with that cookie to obtain an access JWT and user
-context. Browser requests must include credentials so the cookie is stored
-and sent. The frontend should keep the access token in memory and send it as
-`Authorization: Bearer <token>`; it should not put either credential in
-`localStorage`. `POST /api/v1/auth/refresh` rotates the cookie and returns a new
-access JWT. `GET /api/v1/auth/me` requires the Bearer token and returns the user
-plus current business membership roles.
+`{"status_code":200,"message":"Login successful. Welcome back"}` and sets two
+HttpOnly cookies: `zeexco_access` (short-lived access JWT, `Path=/`) and
+`zeexco_refresh` (rotating opaque refresh credential, `Path=/api/v1/auth`).
+User details, business details, and tokens are not included in login or refresh
+JSON. `POST /api/v1/auth/refresh` renews both cookies and returns only
+`{"status_code":200,"message":"Session refreshed successfully."}`.
 
-The refresh cookie defaults to `Secure`, `HttpOnly`, `SameSite=Lax`, and path
-`/api/v1/auth`. Production must retain `AUTH_REFRESH_COOKIE_SECURE=true`. For
+Use `fetch(url, { credentials: "include" })` or Axios `withCredentials: true`
+for login, refresh, logout, and protected API requests. The browser stores and
+sends the cookies; frontend JavaScript does not read tokens or store them in
+memory or localStorage. `GET /api/v1/auth/session` reads the access cookie and
+returns `status_code`, `message`, `user`, and `businesses` with the latest
+membership roles from PostgreSQL. Call it after login and on page reload to
+initialize frontend authorization. No tokens are returned, no cookies are
+rotated, and responses are marked `Cache-Control: no-store`. Pending or suspended
+accounts receive 403; a missing, invalid, or expired access cookie receives 401.
+`GET /api/v1/auth/me` remains available for existing clients.
+
+```javascript
+const response = await fetch(`${apiBaseUrl}/api/v1/auth/session`, {
+  credentials: "include",
+});
+// On success, use user and businesses[].membership_role to render the UI.
+// Backend routes still enforce business membership and authorization.
+```
+
+On access expiry (401),
+refresh once and retry the original request; return to login if refresh fails.
+Serialize concurrent refresh calls because each refresh credential is single-use.
+
+Login, refresh, logout, and unsafe cookie-authenticated requests require an
+`Origin` exactly matching `PUBLIC_FRONTEND_BASE_URL`. Browsers send this header;
+API tools must supply it explicitly. Bearer headers remain supported for
+non-browser clients, but an access cookie takes precedence when present.
+Registration still creates a pending account and returns only status and
+activation instructions; it does not issue authentication cookies before email
+verification. After verification, log in to create the session.
+
+Both cookies default to `Secure`, `HttpOnly`, and `SameSite=Lax`. The existing
+`AUTH_REFRESH_COOKIE_DOMAIN`, `AUTH_REFRESH_COOKIE_SECURE`, and
+`AUTH_REFRESH_COOKIE_SAME_SITE` settings apply to both. `AUTH_ACCESS_COOKIE_NAME`
+and `AUTH_REFRESH_COOKIE_NAME` customize their distinct names. Production must
+retain `AUTH_REFRESH_COOKIE_SECURE=true`. For
 local HTTP development only, explicitly set
 `AUTH_REFRESH_COOKIE_SECURE=false`; `SameSite=None` is rejected unless Secure is
 enabled. The cookie name, domain, SameSite mode, and token lifetimes are
 configurable through the variables in `.env.example`.
 
-`POST /api/v1/auth/logout` revokes the presented refresh session and clears the
-cookie. A previously issued access JWT is stateless and remains valid until its
+`POST /api/v1/auth/logout` revokes the presented refresh session and clears both
+cookies. Invalid refresh sessions also clear both cookies. A previously copied
+access JWT is stateless and remains valid until its
 short expiry (15 minutes by default); there is intentionally no access-token
 denylist in this phase.
 

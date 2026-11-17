@@ -21,23 +21,24 @@ type AuthenticationService interface {
 	Me(context.Context, models.Principal) (models.UserContext, error)
 }
 
-type RefreshCookieConfig struct {
-	Name     string
-	Path     string
-	Domain   string
-	Secure   bool
-	SameSite http.SameSite
-	Lifetime time.Duration
+type SessionCookieConfig struct {
+	AccessName string
+	Name       string
+	Path       string
+	Domain     string
+	Secure     bool
+	SameSite   http.SameSite
+	Lifetime   time.Duration
 }
 
 type AuthenticationController struct {
 	service AuthenticationService
-	cookie  RefreshCookieConfig
+	cookie  SessionCookieConfig
 }
 
 func NewAuthenticationController(
 	service AuthenticationService,
-	cookie RefreshCookieConfig,
+	cookie SessionCookieConfig,
 ) *AuthenticationController {
 	return &AuthenticationController{service: service, cookie: cookie}
 }
@@ -68,7 +69,7 @@ func (c *AuthenticationController) Login(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	c.setRefreshCookie(w, result.RefreshToken)
+	c.setSessionCookies(w, result)
 	setAuthenticationCacheHeaders(w)
 	writeJSON(w, http.StatusOK, schemas.LoginResponse{
 		StatusCode: http.StatusOK,
@@ -79,14 +80,14 @@ func (c *AuthenticationController) Login(w http.ResponseWriter, r *http.Request)
 func (c *AuthenticationController) Refresh(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(c.cookie.Name)
 	if err != nil || cookie.Value == "" {
-		c.clearRefreshCookie(w)
+		c.clearSessionCookies(w)
 		writeError(w, http.StatusUnauthorized, "INVALID_REFRESH_SESSION", "refresh session is invalid", "")
 		return
 	}
 
 	result, err := c.service.Refresh(r.Context(), cookie.Value)
 	if errors.Is(err, services.ErrInvalidRefresh) {
-		c.clearRefreshCookie(w)
+		c.clearSessionCookies(w)
 		writeError(w, http.StatusUnauthorized, "INVALID_REFRESH_SESSION", "refresh session is invalid", "")
 		return
 	}
@@ -95,9 +96,11 @@ func (c *AuthenticationController) Refresh(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "REFRESH_FAILED", "session refresh could not be completed", "")
 		return
 	}
-	c.setRefreshCookie(w, result.RefreshToken)
+	c.setSessionCookies(w, result)
 	setAuthenticationCacheHeaders(w)
-	writeJSON(w, http.StatusOK, authenticationResponse(result))
+	writeJSON(w, http.StatusOK, schemas.LoginResponse{
+		StatusCode: http.StatusOK, Message: "Session refreshed successfully.",
+	})
 }
 
 func (c *AuthenticationController) Logout(w http.ResponseWriter, r *http.Request) {
@@ -109,11 +112,12 @@ func (c *AuthenticationController) Logout(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "LOGOUT_FAILED", "logout could not be completed", "")
 		return
 	}
-	c.clearRefreshCookie(w)
+	c.clearSessionCookies(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (c *AuthenticationController) Me(w http.ResponseWriter, r *http.Request) {
+	setAuthenticationCacheHeaders(w)
 	principal, ok := authmiddleware.PrincipalFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication is required", "")
@@ -127,16 +131,55 @@ func (c *AuthenticationController) Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meResponse(userContext))
 }
 
-func (c *AuthenticationController) setRefreshCookie(w http.ResponseWriter, rawToken string) {
+// Session loads current authorization context from PostgreSQL rather than
+// trusting roles or account status captured when the access JWT was issued.
+func (c *AuthenticationController) Session(w http.ResponseWriter, r *http.Request) {
+	setAuthenticationCacheHeaders(w)
+	principal, ok := authmiddleware.PrincipalFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Authentication is required", "")
+		return
+	}
+	userContext, err := c.service.Me(r.Context(), principal)
+	if errors.Is(err, models.ErrCredentialsNotFound) {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Session is no longer valid. Please log in again.", "")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "SESSION_LOAD_FAILED", "Session could not be loaded", "")
+		return
+	}
+	if userContext.User.Status != models.UserStatusActive {
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_ACTIVE", "Account is not active", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, schemas.SessionResponse{
+		StatusCode: http.StatusOK, Message: "Session retrieved successfully.",
+		User: registeredUser(userContext.User), Businesses: businessResponses(userContext),
+	})
+}
+
+func (c *AuthenticationController) setSessionCookies(w http.ResponseWriter, result services.AuthenticationResult) {
 	http.SetCookie(w, &http.Cookie{
-		Name: c.cookie.Name, Value: rawToken, Path: c.cookie.Path,
+		Name: c.cookie.AccessName, Value: result.AccessToken, Path: "/",
+		Domain: c.cookie.Domain, MaxAge: int(result.ExpiresIn),
+		Expires:  time.Now().UTC().Add(time.Duration(result.ExpiresIn) * time.Second),
+		HttpOnly: true, Secure: c.cookie.Secure, SameSite: c.cookie.SameSite,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name: c.cookie.Name, Value: result.RefreshToken, Path: c.cookie.Path,
 		Domain: c.cookie.Domain, MaxAge: int(c.cookie.Lifetime.Seconds()),
 		Expires:  time.Now().UTC().Add(c.cookie.Lifetime),
 		HttpOnly: true, Secure: c.cookie.Secure, SameSite: c.cookie.SameSite,
 	})
 }
 
-func (c *AuthenticationController) clearRefreshCookie(w http.ResponseWriter) {
+func (c *AuthenticationController) clearSessionCookies(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name: c.cookie.AccessName, Value: "", Path: "/", Domain: c.cookie.Domain,
+		MaxAge: -1, Expires: time.Unix(1, 0).UTC(), HttpOnly: true,
+		Secure: c.cookie.Secure, SameSite: c.cookie.SameSite,
+	})
 	http.SetCookie(w, &http.Cookie{
 		Name: c.cookie.Name, Value: "", Path: c.cookie.Path, Domain: c.cookie.Domain,
 		MaxAge: -1, Expires: time.Unix(1, 0).UTC(), HttpOnly: true,
@@ -159,14 +202,6 @@ func decodeAuthenticationJSON(w http.ResponseWriter, r *http.Request, destinatio
 		return errors.New("request contains multiple JSON values")
 	}
 	return nil
-}
-
-func authenticationResponse(result services.AuthenticationResult) schemas.AuthenticationResponse {
-	response := schemas.AuthenticationResponse{
-		AccessToken: result.AccessToken, TokenType: "Bearer", ExpiresIn: result.ExpiresIn,
-		User: registeredUser(result.Context.User), Businesses: businessResponses(result.Context),
-	}
-	return response
 }
 
 func meResponse(userContext models.UserContext) schemas.MeResponse {

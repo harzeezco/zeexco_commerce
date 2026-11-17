@@ -960,6 +960,17 @@ rather than unlimited generation.
 
 # 31. Authentication
 
+Browser password login establishes two HttpOnly cookies: a short-lived access
+JWT on `/` and a rotating opaque refresh credential on `/api/v1/auth`.
+Login and refresh return only a status code and message; protected API routes
+verify the access cookie. Unsafe cookie-authenticated requests require an exact
+trusted Origin. Logout expires both cookies and revokes the refresh session.
+Registration remains pending until email verification and does not establish
+an authenticated session. The frontend uses credentialed requests and reads
+account and membership context from `GET /api/v1/auth/session` after login or
+page reload. Session reads verify the access JWT, recheck active account status,
+and load current business memberships from PostgreSQL without rotating cookies.
+
 MVP options:
 
 - phone + OTP
