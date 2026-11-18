@@ -44,6 +44,18 @@ count.
 the API container starts. Rebuilding an image alone does not alter the database;
 the migration runs when the rebuilt API starts.
 
+The Dockerfile compiles the API, worker, embedded email assets, and migrations
+into the image. Compose has no source mount or file watcher, so local edits do
+not update running containers. After source changes, rebuild and recreate only
+the application services:
+
+```powershell
+docker compose up -d --build api worker
+```
+
+`docker compose restart` runs the existing image and does not compile changes.
+PostgreSQL does not need to be restarted for application code changes.
+
 For databases created before migration tracking existed, the runner validates
 the known legacy tables, columns, constraints, and indexes before recording
 their historical versions. It then applies only pending migrations. A partially
@@ -102,36 +114,98 @@ delivery job. Email is normalized to lowercase, uniqueness is enforced by
 PostgreSQL, and passwords are stored only as bcrypt hashes. The account cannot
 log in until the email address is verified.
 
+Passwords must contain a letter (uppercase or lowercase), a number, and a
+symbol. Spaces do not count as symbols. Passwords must be at least 8 characters
+and no more than 72 UTF-8 bytes, and are preserved exactly as entered.
+
 ```json
 {
   "first_name": "Ada",
   "last_name": "Lovelace",
   "business_name": "Analytical Commerce",
   "email": "ada@example.com",
-  "password": "correct horse battery staple"
+  "password": "correct horse battery staple1!"
 }
 ```
 
-The `202 Accepted` response contains the pending user, business, and
-`"next_step":"VERIFY_EMAIL"`. A database-backed worker sends the activation
-message through Resend outside the request path. Failed and interrupted jobs
-are retried with exponential backoff; Resend receives a stable idempotency key
-so retries do not intentionally duplicate mail.
+The `202 Accepted` response returns only a status code and message, without
+user details, business details, or onboarding metadata:
+
+```json
+{
+  "status_code": 202,
+  "message": "Registration successful. Please check your email to activate your account."
+}
+```
+
+A database-backed worker sends the activation
+message through Resend from the configured security sender outside the request
+path. Failed and interrupted jobs are retried with exponential backoff; Resend
+receives a stable idempotency key so retries do not intentionally duplicate
+mail.
+
+New activation links expire after 10 minutes by default
+(`EMAIL_VERIFICATION_TTL=10m`). The email displays the actual remaining lifetime
+in minutes. An explicit environment setting overrides the default; changing
+this setting does not change links that were already issued.
 
 The activation page reads the signed `token` query parameter and sends
 `{"token":"..."}` to `POST /api/v1/auth/verify-email`. A valid, unexpired,
-single-use token changes the user to `ACTIVE`; the frontend can then redirect
-to login. Registration does not create a WhatsApp identity or auto-login.
-The authoritative local contract is `docs/api/openapi.yaml`.
+single-use token atomically changes the user to `ACTIVE` and queues one welcome
+email. The same worker sends that welcome email from the lifecycle sender; a
+temporary Resend failure cannot roll back activation. The frontend can then
+redirect to login. Registration does not create a WhatsApp identity or
+auto-login. The authoritative local contract is `docs/api/openapi.yaml`.
 
-WhatsApp-first registration is intentionally separate. After validating the
-opaque onboarding token, the frontend calls
-`POST /api/v1/whatsapp/onboarding/register` with required `first_name`,
-`last_name`, `business_name`, and `onboarding_token`; `email` is optional and
-no password is accepted. The linked WhatsApp identity is resolved only from
-the server-side onboarding session. A WhatsApp-only user stores `NULL` for
-both an omitted email and its password hash, while the identity link is
-created in the same transaction.
+Email delivery requires `RESEND_API_KEY`,
+`RESEND_SECURITY_FROM_EMAIL` (for example,
+`Zeexco <no-reply@zeexco.com>`), and `RESEND_LIFECYCLE_FROM_EMAIL` (for
+example, `Zeexco <hello@zeexco.com>`). The API also requires
+`EMAIL_VERIFICATION_FRONTEND_URL` and
+`EMAIL_VERIFICATION_HMAC_SECRET_BASE64`. These values belong only in the Go API
+environment; never expose the Resend key or HMAC secret to the Next.js
+frontend.
+
+If a merchant submits valid credentials while the account is still `PENDING`,
+login returns `403 EMAIL_VERIFICATION_REQUIRED` and durably queues or renews the
+verification email. No authentication session is created. Incorrect passwords
+continue to return the generic invalid-credentials response.
+
+## Background workers
+
+The API and background worker run as separate processes. `cmd/api` accepts HTTP
+traffic and durably records email and WhatsApp webhook work in PostgreSQL;
+`cmd/worker` polls and processes those jobs. In Docker Compose they run as the
+`api` and `worker` services from the same image, so a worker crash or restart
+does not terminate the API process. PostgreSQL leases and idempotency keys allow
+unfinished work to be reclaimed after restart.
+
+WhatsApp browser fallback registration uses the same credential validation and
+pending-account creation as web signup. The frontend preserves the `token`
+from `/register?token=...` and sends it as `onboarding_token` with first name,
+last name, business name, required email, and password to
+`POST /api/v1/auth/register` or `POST /api/v1/whatsapp/onboarding/register`.
+Both return HTTP 202 with only status and activation instructions. The session
+is reserved as `EMAIL_VERIFICATION_PENDING`; WhatsApp identity linking waits
+for successful email verification. Existing email addresses are rejected rather
+than silently merged with a WhatsApp sender.
+
+After verification, WhatsApp-originated registration returns HTTP 200 with
+`next_step: "CONTINUE_IN_WHATSAPP"` and a server-configured `redirect_url`.
+The frontend shows a Continue in WhatsApp button using that URL. The public
+development test sender is `+1 (555) 189-2941`; configure
+`WHATSAPP_ONBOARDING_RETURN_URL=https://wa.me/15551892941` (not the Graph phone
+number ID). The backend adds `?text=Continue`; the user must press Send.
+That new inbound message resolves the newly linked identity and triggers the
+existing deterministic Create first product invitation. Activation itself does
+not send a WhatsApp message or automatically sign in to the browser.
+Ordinary web activation still returns HTTP 204. When no public WhatsApp return
+number is configured, the WhatsApp activation response omits `redirect_url`
+and the frontend should instruct the user to return to the chat manually.
+
+The unpublished native WhatsApp Flow remains a separate passwordless adapter.
+Keep `WHATSAPP_MERCHANT_REGISTRATION_FLOW_ID` blank while using the browser
+fallback. See `docs/flows/whatsapp-browser-registration.md` for frontend details.
 
 Future WhatsApp passwordless login should exchange a separate short-lived,
 single-use credential for the existing refresh session and Ed25519 access JWT.
@@ -140,23 +214,58 @@ JWTs must never be placed directly in WhatsApp CTA URLs.
 
 ## Browser authentication
 
-`POST /api/v1/auth/login` accepts email and password. It returns the short-lived
-access JWT in JSON and sets the opaque refresh credential only as an HttpOnly
-cookie. The frontend should keep the access token in memory and send it as
-`Authorization: Bearer <token>`; it should not put either credential in
-`localStorage`. `POST /api/v1/auth/refresh` rotates the cookie and returns a new
-access JWT. `GET /api/v1/auth/me` requires the Bearer token and returns the user
-plus current business membership roles.
+`POST /api/v1/auth/login` accepts email and password. It returns only
+`{"status_code":200,"message":"Login successful. Welcome back"}` and sets two
+HttpOnly cookies: `zeexco_access` (short-lived access JWT, `Path=/`) and
+`zeexco_refresh` (rotating opaque refresh credential, `Path=/api/v1/auth`).
+User details, business details, and tokens are not included in login or refresh
+JSON. `POST /api/v1/auth/refresh` renews both cookies and returns only
+`{"status_code":200,"message":"Session refreshed successfully."}`.
 
-The refresh cookie defaults to `Secure`, `HttpOnly`, `SameSite=Lax`, and path
-`/api/v1/auth`. Production must retain `AUTH_REFRESH_COOKIE_SECURE=true`. For
+Use `fetch(url, { credentials: "include" })` or Axios `withCredentials: true`
+for login, refresh, logout, and protected API requests. The browser stores and
+sends the cookies; frontend JavaScript does not read tokens or store them in
+memory or localStorage. `GET /api/v1/auth/session` reads the access cookie and
+returns `status_code`, `message`, `user`, and `businesses` with the latest
+membership roles from PostgreSQL. Call it after login and on page reload to
+initialize frontend authorization. No tokens are returned, no cookies are
+rotated, and responses are marked `Cache-Control: no-store`. Pending or suspended
+accounts receive 403; a missing, invalid, or expired access cookie receives 401.
+`GET /api/v1/auth/me` remains available for existing clients.
+
+```javascript
+const response = await fetch(`${apiBaseUrl}/api/v1/auth/session`, {
+  credentials: "include",
+});
+// On success, use user and businesses[].membership_role to render the UI.
+// Backend routes still enforce business membership and authorization.
+```
+
+On access expiry (401),
+refresh once and retry the original request; return to login if refresh fails.
+Serialize concurrent refresh calls because each refresh credential is single-use.
+
+Login, refresh, logout, and unsafe cookie-authenticated requests require an
+`Origin` exactly matching `PUBLIC_FRONTEND_BASE_URL`. Browsers send this header;
+API tools must supply it explicitly. Bearer headers remain supported for
+non-browser clients, but an access cookie takes precedence when present.
+Registration still creates a pending account and returns only status and
+activation instructions; it does not issue authentication cookies before email
+verification. After verification, log in to create the session.
+
+Both cookies default to `Secure`, `HttpOnly`, and `SameSite=Lax`. The existing
+`AUTH_REFRESH_COOKIE_DOMAIN`, `AUTH_REFRESH_COOKIE_SECURE`, and
+`AUTH_REFRESH_COOKIE_SAME_SITE` settings apply to both. `AUTH_ACCESS_COOKIE_NAME`
+and `AUTH_REFRESH_COOKIE_NAME` customize their distinct names. Production must
+retain `AUTH_REFRESH_COOKIE_SECURE=true`. For
 local HTTP development only, explicitly set
 `AUTH_REFRESH_COOKIE_SECURE=false`; `SameSite=None` is rejected unless Secure is
 enabled. The cookie name, domain, SameSite mode, and token lifetimes are
 configurable through the variables in `.env.example`.
 
-`POST /api/v1/auth/logout` revokes the presented refresh session and clears the
-cookie. A previously issued access JWT is stateless and remains valid until its
+`POST /api/v1/auth/logout` revokes the presented refresh session and clears both
+cookies. Invalid refresh sessions also clear both cookies. A previously copied
+access JWT is stateless and remains valid until its
 short expiry (15 minutes by default); there is intentionally no access-token
 denylist in this phase.
 
@@ -336,7 +445,7 @@ Configure these values in addition to the existing webhook and Cloud API
 credentials:
 
 ```powershell
-$env:PUBLIC_FRONTEND_BASE_URL = "https://www.zeexco.com"
+$env:PUBLIC_FRONTEND_BASE_URL = "http://localhost:3000"
 $env:WHATSAPP_ONBOARDING_RETURN_URL = "https://wa.me/"
 $env:WHATSAPP_ONBOARDING_TOKEN_TTL = "30m"
 $env:WHATSAPP_MERCHANT_REGISTRATION_FLOW_ID = "<published-meta-flow-id>"
@@ -350,8 +459,8 @@ that owns the configured ID and keep its endpoint set to
 `POST /api/v1/whatsapp/flows`. The Flow ID is environment-specific and must not
 be hardcoded. Leave it blank to force browser fallback.
 
-The public frontend base URL and return URL must be absolute HTTPS URLs. The
-frontend origin is also the exact CORS allow-origin. Leaving it unset disables
+The public frontend base URL must be an absolute HTTPS URL, or HTTP localhost
+for development. The frontend origin is also the exact CORS allow-origin. Leaving it unset disables
 onboarding while preserving browser auth and inbound webhook processing. The
 API automatically applies migrations through `000009`
 on startup. To apply it explicitly:
