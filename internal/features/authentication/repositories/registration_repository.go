@@ -43,6 +43,33 @@ func (r *RegistrationRepository) Register(
 		return nil, fmt.Errorf("begin registration transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	var onboardingID string
+	if len(input.OnboardingTokenHash) != 0 {
+		var status, provider string
+		var expiresAt time.Time
+		err := tx.QueryRow(ctx, `
+			SELECT id::text, status, expires_at, provider
+			FROM whatsapp_onboarding_sessions WHERE token_hash = $1 FOR UPDATE
+		`, input.OnboardingTokenHash).Scan(&onboardingID, &status, &expiresAt, &provider)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, authmodels.ErrOnboardingInvalid
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lock registration onboarding token: %w", err)
+		}
+		if provider != "META_WHATSAPP" {
+			return nil, authmodels.ErrOnboardingInvalid
+		}
+		if status == "EXPIRED" {
+			return nil, authmodels.ErrOnboardingExpired
+		}
+		if status != "REGISTRATION_PENDING" {
+			return nil, authmodels.ErrOnboardingConsumed
+		}
+		if !r.now().UTC().Before(expiresAt) {
+			return nil, authmodels.ErrOnboardingExpired
+		}
+	}
 
 	registration := &authmodels.Registration{}
 	err = tx.QueryRow(ctx, `
@@ -139,6 +166,22 @@ func (r *RegistrationRepository) Register(
 		return nil, fmt.Errorf("create email verification audit event: %w", err)
 	}
 
+	if onboardingID != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE whatsapp_onboarding_sessions
+			SET status = 'EMAIL_VERIFICATION_PENDING', linked_user_id = $2,
+			    linked_business_id = $3, updated_at = $4
+			WHERE id = $1
+		`, onboardingID, registration.User.ID, registration.Business.ID, r.now().UTC()); err != nil {
+			return nil, fmt.Errorf("reserve WhatsApp browser registration: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_events (actor_user_id, business_id, event_type, metadata)
+			VALUES ($1, $2, 'WHATSAPP_BROWSER_REGISTRATION_PENDING', jsonb_build_object('onboarding_session_id', $3::text))
+		`, registration.User.ID, registration.Business.ID, onboardingID); err != nil {
+			return nil, fmt.Errorf("audit WhatsApp registration reservation: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit registration transaction: %w", err)
 	}

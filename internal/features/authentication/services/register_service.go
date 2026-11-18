@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/mail"
@@ -25,11 +27,12 @@ var (
 )
 
 type RegisterCommand struct {
-	FirstName    string
-	LastName     string
-	BusinessName string
-	Email        string
-	Password     string
+	OnboardingToken string
+	FirstName       string
+	LastName        string
+	BusinessName    string
+	Email           string
+	Password        string
 }
 
 type ValidationError struct {
@@ -101,6 +104,15 @@ func (s *RegisterService) Prepare(command RegisterCommand) (models.RegistrationI
 	if err != nil {
 		return models.RegistrationInput{}, err
 	}
+	var onboardingHash []byte
+	if command.OnboardingToken != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(command.OnboardingToken)
+		if err != nil || len(decoded) != 32 {
+			return models.RegistrationInput{}, models.ErrOnboardingInvalid
+		}
+		digest := sha256.Sum256([]byte(command.OnboardingToken))
+		onboardingHash = digest[:]
+	}
 
 	passwordHash, err := s.hasher.Hash(command.Password)
 	if err != nil {
@@ -108,11 +120,12 @@ func (s *RegisterService) Prepare(command RegisterCommand) (models.RegistrationI
 	}
 
 	return models.RegistrationInput{
-		FirstName:    normalized.FirstName,
-		LastName:     normalized.LastName,
-		BusinessName: normalized.BusinessName,
-		Email:        normalized.Email,
-		PasswordHash: passwordHash,
+		OnboardingTokenHash: onboardingHash,
+		FirstName:           normalized.FirstName,
+		LastName:            normalized.LastName,
+		BusinessName:        normalized.BusinessName,
+		Email:               normalized.Email,
+		PasswordHash:        passwordHash,
 	}, nil
 }
 

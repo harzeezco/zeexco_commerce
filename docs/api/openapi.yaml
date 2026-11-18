@@ -102,7 +102,7 @@ paths:
                   expires_at: { type: string, format: date-time }
         '400': { description: Token is missing or malformed. }
         '404': { description: Token is unknown. }
-        '409': { description: Token has already been consumed. }
+        '409': { description: Token has already been consumed, or registration is waiting for email verification. }
         '410': { description: Token has expired. }
         '429': { $ref: '#/components/responses/RateLimited' }
         '500': { $ref: '#/components/responses/InternalError' }
@@ -111,20 +111,22 @@ paths:
       operationId: registerWhatsAppMerchant
       summary: Register a merchant from a verified WhatsApp onboarding session
       description: >-
-        Atomically creates the user, business, OWNER membership, links the
-        server-derived WhatsApp identity, and consumes the onboarding token.
-        No password or client-supplied WhatsApp identity is accepted.
+        Uses the same email/password registration service as web signup.
+        Creates a PENDING user, business, OWNER membership, verification email
+        job, and reserves the server-derived WhatsApp session atomically.
+        The identity is linked only after email activation. No client-supplied
+        provider, phone number, or WhatsApp identity is accepted.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/WhatsAppRegisterRequest' }
       responses:
-        '201':
-          description: WhatsApp-first merchant registration was committed.
+        '202':
+          description: Registration received; email verification is required before WhatsApp continuation.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/WhatsAppRegisterResponse' }
+              schema: { $ref: '#/components/schemas/RegisterResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { description: Email, identity, or onboarding-token conflict. }
         '410': { description: The onboarding token has expired. }
@@ -182,7 +184,9 @@ paths:
       summary: Create a user, business, and OWNER membership
       description: >-
         Atomically creates a web account and business using required email and
-        password credentials. WhatsApp onboarding is a separate endpoint.
+        password credentials. An optional onboarding_token reserves a WhatsApp
+        onboarding session; provider and sender identity are read only from
+        that trusted session. Email verification completes the identity link.
       requestBody:
         required: true
         content:
@@ -201,6 +205,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '413': { description: Request body exceeds 16 KiB. }
+        '410': { description: The supplied onboarding token has expired. }
         '429': { $ref: '#/components/responses/RateLimited' }
         '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/auth/verify-email:
@@ -223,6 +228,21 @@ paths:
                 token: { type: string }
       responses:
         '204': { description: Email verified, pending user activated, and welcome email durably queued. }
+        '200':
+          description: WhatsApp browser account activated, identity linked, and continuation destination returned. Frontend shows Continue in WhatsApp; the user must send the prefilled message.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status_code, message, next_step]
+                properties:
+                  status_code: { type: integer, const: 200 }
+                  message: { type: string, example: Account activated successfully. Continue in WhatsApp. }
+                  next_step: { type: string, const: CONTINUE_IN_WHATSAPP }
+                  redirect_url:
+                    type: string
+                    format: uri
+                    description: Trusted server-configured wa.me public sender link with text=Continue. Omitted when no public return number is configured.
         '400': { description: Token or request body is invalid. }
         '409': { description: Token was already consumed. }
         '410': { description: Token has expired. }
@@ -419,6 +439,7 @@ components:
       additionalProperties: false
       required: [first_name, last_name, business_name, email, password]
       properties:
+        onboarding_token: { type: string, minLength: 43, maxLength: 43, writeOnly: true }
         first_name: { type: string, minLength: 1, maxLength: 100 }
         last_name: { type: string, minLength: 1, maxLength: 100 }
         business_name: { type: string, minLength: 1, maxLength: 200 }
@@ -438,12 +459,13 @@ components:
     WhatsAppRegisterRequest:
       type: object
       additionalProperties: false
-      required: [first_name, last_name, business_name, onboarding_token]
+      required: [first_name, last_name, business_name, email, password, onboarding_token]
       properties:
         first_name: { type: string, minLength: 1, maxLength: 100 }
         last_name: { type: string, minLength: 1, maxLength: 100 }
         business_name: { type: string, minLength: 1, maxLength: 200 }
         email: { type: string, format: email, maxLength: 255 }
+        password: { $ref: '#/components/schemas/RegisterRequest/properties/password' }
         onboarding_token: { type: string, minLength: 1, writeOnly: true }
     LoginRequest:
       type: object

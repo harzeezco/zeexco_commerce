@@ -180,14 +180,32 @@ traffic and durably records email and WhatsApp webhook work in PostgreSQL;
 does not terminate the API process. PostgreSQL leases and idempotency keys allow
 unfinished work to be reclaimed after restart.
 
-WhatsApp-first registration is intentionally separate. After validating the
-opaque onboarding token, the frontend calls
-`POST /api/v1/whatsapp/onboarding/register` with required `first_name`,
-`last_name`, `business_name`, and `onboarding_token`; `email` is optional and
-no password is accepted. The linked WhatsApp identity is resolved only from
-the server-side onboarding session. A WhatsApp-only user stores `NULL` for
-both an omitted email and its password hash, while the identity link is
-created in the same transaction.
+WhatsApp browser fallback registration uses the same credential validation and
+pending-account creation as web signup. The frontend preserves the `token`
+from `/register?token=...` and sends it as `onboarding_token` with first name,
+last name, business name, required email, and password to
+`POST /api/v1/auth/register` or `POST /api/v1/whatsapp/onboarding/register`.
+Both return HTTP 202 with only status and activation instructions. The session
+is reserved as `EMAIL_VERIFICATION_PENDING`; WhatsApp identity linking waits
+for successful email verification. Existing email addresses are rejected rather
+than silently merged with a WhatsApp sender.
+
+After verification, WhatsApp-originated registration returns HTTP 200 with
+`next_step: "CONTINUE_IN_WHATSAPP"` and a server-configured `redirect_url`.
+The frontend shows a Continue in WhatsApp button using that URL. The public
+development test sender is `+1 (555) 189-2941`; configure
+`WHATSAPP_ONBOARDING_RETURN_URL=https://wa.me/15551892941` (not the Graph phone
+number ID). The backend adds `?text=Continue`; the user must press Send.
+That new inbound message resolves the newly linked identity and triggers the
+existing deterministic Create first product invitation. Activation itself does
+not send a WhatsApp message or automatically sign in to the browser.
+Ordinary web activation still returns HTTP 204. When no public WhatsApp return
+number is configured, the WhatsApp activation response omits `redirect_url`
+and the frontend should instruct the user to return to the chat manually.
+
+The unpublished native WhatsApp Flow remains a separate passwordless adapter.
+Keep `WHATSAPP_MERCHANT_REGISTRATION_FLOW_ID` blank while using the browser
+fallback. See `docs/flows/whatsapp-browser-registration.md` for frontend details.
 
 Future WhatsApp passwordless login should exchange a separate short-lived,
 single-use credential for the existing refresh session and Ed25519 access JWT.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	authmodels "github.com/harzeezco/zeexco_commerce/internal/features/authentication/models"
+	authservices "github.com/harzeezco/zeexco_commerce/internal/features/authentication/services"
 )
 
 func TestValidateAPIReturnsOnlyPendingContext(t *testing.T) {
@@ -22,7 +23,7 @@ func TestValidateAPIReturnsOnlyPendingContext(t *testing.T) {
 		ExpiresAt: expiresAt,
 	}}
 	recorder := httptest.NewRecorder()
-	NewController(service).ValidateAPI(recorder, httptest.NewRequest(
+	NewController(service, service).ValidateAPI(recorder, httptest.NewRequest(
 		http.MethodGet, "/api/v1/whatsapp/onboarding/validate?token="+url.QueryEscape(raw), nil,
 	))
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" {
@@ -59,7 +60,7 @@ func TestValidateAPIMapsStableTokenErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service := &fakeWebService{validateError: test.err}
 			recorder := httptest.NewRecorder()
-			NewController(service).ValidateAPI(recorder, httptest.NewRequest(http.MethodGet, test.target, nil))
+			NewController(service, service).ValidateAPI(recorder, httptest.NewRequest(http.MethodGet, test.target, nil))
 			if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`) {
 				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
@@ -67,9 +68,9 @@ func TestValidateAPIMapsStableTokenErrors(t *testing.T) {
 	}
 }
 
-func TestRegisterAPIIsExplicitTokenRequiredAndPasswordless(t *testing.T) {
+func TestRegisterAPIRequiresTokenAndForwardsBrowserCredentials(t *testing.T) {
 	service := &fakeWebService{}
-	controller := NewController(service)
+	controller := NewController(service, service)
 
 	missing := httptest.NewRecorder()
 	controller.RegisterAPI(missing, httptest.NewRequest(http.MethodPost,
@@ -84,32 +85,32 @@ func TestRegisterAPIIsExplicitTokenRequiredAndPasswordless(t *testing.T) {
 	controller.RegisterAPI(success, httptest.NewRequest(http.MethodPost,
 		"/api/v1/whatsapp/onboarding/register", strings.NewReader(`{
 			"first_name":"Ada","last_name":"Lovelace","business_name":"Commerce",
-			"onboarding_token":"opaque-token"
+			"onboarding_token":"opaque-token","email":"ada@example.com","password":"validpass1!"
 		}`)))
-	if success.Code != http.StatusCreated || service.completeToken != "opaque-token" || service.completeCommand.Email != "" {
+	if success.Code != http.StatusAccepted || service.completeToken != "opaque-token" || service.browserCommand.Email != "ada@example.com" || service.browserCommand.Password != "validpass1!" {
 		t.Fatalf("status=%d token=%q command=%#v body=%s", success.Code, service.completeToken, service.completeCommand, success.Body.String())
 	}
 
-	password := httptest.NewRecorder()
-	controller.RegisterAPI(password, httptest.NewRequest(http.MethodPost,
+	identity := httptest.NewRecorder()
+	controller.RegisterAPI(identity, httptest.NewRequest(http.MethodPost,
 		"/api/v1/whatsapp/onboarding/register", strings.NewReader(`{
 			"first_name":"Ada","last_name":"Lovelace","business_name":"Commerce",
-			"onboarding_token":"opaque-token","password":"must-not-be-accepted"
+			"onboarding_token":"opaque-token","provider":"attacker-selected-provider"
 		}`)))
-	if password.Code != http.StatusBadRequest || !strings.Contains(password.Body.String(), "INVALID_JSON") {
-		t.Fatalf("password status=%d body=%s", password.Code, password.Body.String())
+	if identity.Code != http.StatusBadRequest || !strings.Contains(identity.Body.String(), "INVALID_JSON") {
+		t.Fatalf("identity status=%d body=%s", identity.Code, identity.Body.String())
 	}
 }
 
 func TestRegistrationPageAndSafeErrors(t *testing.T) {
 	raw, _, _ := NewToken()
 	service := &fakeWebService{returnURL: "https://wa.me/"}
-	controller := NewController(service)
+	controller := NewController(service, service)
 
 	recorder := httptest.NewRecorder()
 	controller.Page(recorder, httptest.NewRequest(http.MethodGet, "/get-started?t="+url.QueryEscape(raw), nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `name="business_name"`) ||
-		strings.Contains(recorder.Body.String(), `name="phone"`) || strings.Contains(recorder.Body.String(), `name="password"`) {
+		strings.Contains(recorder.Body.String(), `name="phone"`) || !strings.Contains(recorder.Body.String(), `name="password"`) {
 		t.Fatalf("unexpected registration page status=%d", recorder.Code)
 	}
 	if recorder.Header().Get("Cache-Control") != "no-store" {
@@ -119,19 +120,35 @@ func TestRegistrationPageAndSafeErrors(t *testing.T) {
 	service.completeError = authmodels.ErrEmailAlreadyRegistered
 	form := url.Values{"token": {raw}, "email": {"existing@example.com"}, "password": {"never-redisplay"}}
 	recorder = httptest.NewRecorder()
-	controller.Submit(recorder, httptest.NewRequest(http.MethodPost, "/get-started", strings.NewReader(form.Encode())))
+	request := httptest.NewRequest(http.MethodPost, "/get-started", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	controller.Submit(recorder, request)
 	if recorder.Code != http.StatusConflict || strings.Contains(recorder.Body.String(), "never-redisplay") || !strings.Contains(recorder.Body.String(), "future authenticated linking flow") {
 		t.Fatal("duplicate email was not handled safely")
 	}
 }
 
-func TestConsumedPageShowsSuccessAndRetriesDelivery(t *testing.T) {
+func TestConsumedPageShowsSuccessWithoutSendingWhatsAppMessage(t *testing.T) {
 	userID := "user-id"
 	service := &fakeWebService{validateSession: Session{LinkedUserID: &userID}, validateError: ErrSessionConsumed, returnURL: "https://wa.me/"}
 	recorder := httptest.NewRecorder()
-	NewController(service).Page(recorder, httptest.NewRequest(http.MethodGet, "/get-started?t=token", nil))
-	if recorder.Code != http.StatusOK || service.retried != userID || !strings.Contains(recorder.Body.String(), "Continue in WhatsApp") {
+	NewController(service, service).Page(recorder, httptest.NewRequest(http.MethodGet, "/get-started?t=token", nil))
+	if recorder.Code != http.StatusOK || service.retried != "" || !strings.Contains(recorder.Body.String(), "Continue in WhatsApp") {
 		t.Fatal("consumed URL did not provide idempotent success state")
+	}
+}
+
+func TestPendingVerificationCannotContinueFromBrowser(t *testing.T) {
+	service := &fakeWebService{validateSession: Session{Status: StatusEmailVerificationPending}, validateError: ErrSessionConsumed}
+	response := httptest.NewRecorder()
+	NewController(service, service).Page(response, httptest.NewRequest(http.MethodGet, "/get-started?t=used-token", nil))
+	if response.Code != 200 || !strings.Contains(response.Body.String(), "Check your email") || strings.Contains(response.Body.String(), `href="https://wa.me/`) || service.retried != "" {
+		t.Fatal("unverified browser registration advanced to WhatsApp")
+	}
+	response = httptest.NewRecorder()
+	NewController(service, service).ValidateAPI(response, httptest.NewRequest(http.MethodGet, "/validate?token=used-token", nil))
+	if response.Code != 409 || !strings.Contains(response.Body.String(), "ONBOARDING_VERIFICATION_PENDING") {
+		t.Fatal("pending verification API context is missing")
 	}
 }
 
@@ -141,6 +158,13 @@ type fakeWebService struct {
 	retried, returnURL           string
 	completeToken                string
 	completeCommand              RegisterCommand
+	browserCommand               authservices.RegisterCommand
+}
+
+func (f *fakeWebService) Register(_ context.Context, command authservices.RegisterCommand) (*authmodels.Registration, error) {
+	f.browserCommand = command
+	f.completeToken = command.OnboardingToken
+	return &authmodels.Registration{}, f.completeError
 }
 
 func (f *fakeWebService) Validate(context.Context, string) (Session, error) {

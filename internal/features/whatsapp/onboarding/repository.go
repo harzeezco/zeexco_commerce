@@ -55,9 +55,9 @@ func (r *Repository) PrepareWelcome(
 	err = scanSession(tx.QueryRow(ctx, `
 		SELECT `+sessionColumns+`
 		FROM whatsapp_onboarding_sessions
-		WHERE provider = $1 AND provider_user_id = $2 AND status = $3
+		WHERE provider = $1 AND provider_user_id = $2 AND status IN ($3, $4)
 		FOR UPDATE
-	`, ProviderMetaWhatsApp, providerUserID, StatusRegistrationPending), &session)
+	`, ProviderMetaWhatsApp, providerUserID, StatusRegistrationPending, StatusEmailVerificationPending), &session)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = scanSession(tx.QueryRow(ctx, `
 			INSERT INTO whatsapp_onboarding_sessions (
@@ -77,7 +77,7 @@ func (r *Repository) PrepareWelcome(
 	} else if err != nil {
 		return WelcomePreparation{}, fmt.Errorf("load onboarding session: %w", err)
 	} else {
-		if session.WelcomeSentAt != nil ||
+		if session.Status == StatusEmailVerificationPending || session.WelcomeSentAt != nil ||
 			(session.WelcomeDeliveryStartedAt != nil && session.WelcomeDeliveryStartedAt.After(claimBefore)) {
 			if err := tx.Commit(ctx); err != nil {
 				return WelcomePreparation{}, fmt.Errorf("commit onboarding welcome lookup: %w", err)

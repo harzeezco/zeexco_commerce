@@ -39,11 +39,12 @@ func (c *AuthController) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	command := services.RegisterCommand{
-		FirstName:    request.FirstName,
-		LastName:     request.LastName,
-		BusinessName: request.BusinessName,
-		Email:        request.Email,
-		Password:     request.Password,
+		OnboardingToken: request.OnboardingToken,
+		FirstName:       request.FirstName,
+		LastName:        request.LastName,
+		BusinessName:    request.BusinessName,
+		Email:           request.Email,
+		Password:        request.Password,
 	}
 	_, err = c.registerService.Register(r.Context(), command)
 	if err != nil {
@@ -53,6 +54,12 @@ func (c *AuthController) Register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", validationError.Message, validationError.Field)
 		case errors.Is(err, authmodels.ErrEmailAlreadyRegistered):
 			writeError(w, http.StatusConflict, "EMAIL_ALREADY_REGISTERED", "An account with this email already exists", "email")
+		case errors.Is(err, authmodels.ErrOnboardingInvalid):
+			writeError(w, http.StatusBadRequest, "ONBOARDING_TOKEN_INVALID", "This registration link is invalid", "onboarding_token")
+		case errors.Is(err, authmodels.ErrOnboardingExpired):
+			writeError(w, http.StatusGone, "ONBOARDING_TOKEN_EXPIRED", "This registration link has expired", "onboarding_token")
+		case errors.Is(err, authmodels.ErrOnboardingConsumed):
+			writeError(w, http.StatusConflict, "ONBOARDING_TOKEN_CONSUMED", "This registration link has already been used", "onboarding_token")
 		default:
 			writeError(w, http.StatusInternalServerError, "REGISTRATION_FAILED", "registration could not be completed", "")
 		}

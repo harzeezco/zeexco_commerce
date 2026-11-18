@@ -47,16 +47,15 @@ func TestRegisterReturnsOnlyStatusCodeAndMessage(t *testing.T) {
 	}
 }
 
-func TestWebRegisterRejectsWhatsAppOnboardingMode(t *testing.T) {
+func TestWebRegisterForwardsOptionalOnboardingToken(t *testing.T) {
 	service := &fakeRegistrationService{}
 	response := performRegistrationRequest(service, `{
 		"first_name":"Ada","last_name":"Lovelace","business_name":"Commerce",
 		"email":"ada@example.com","password":"correct horse battery staple1!",
 		"onboarding_token":"token"
 	}`)
-	assertAPIError(t, response, http.StatusBadRequest, "INVALID_JSON")
-	if service.calls != 0 {
-		t.Fatal("web registration accepted WhatsApp onboarding mode")
+	if response.Code != http.StatusAccepted || service.calls != 1 || service.command.OnboardingToken != "token" {
+		t.Fatal("web registration did not forward its onboarding token")
 	}
 }
 

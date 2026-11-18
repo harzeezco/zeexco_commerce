@@ -200,9 +200,14 @@ func (r *Repository) RequestVerification(
 }
 
 func (r *Repository) Verify(ctx context.Context, verificationID string, now time.Time) error {
+	_, err := r.VerifyWithContinuation(ctx, verificationID, now)
+	return err
+}
+
+func (r *Repository) VerifyWithContinuation(ctx context.Context, verificationID string, now time.Time) (bool, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin email verification: %w", err)
+		return false, fmt.Errorf("begin email verification: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var userID string
@@ -213,50 +218,81 @@ func (r *Repository) Verify(ctx context.Context, verificationID string, now time
 		FROM email_verifications WHERE id = $1 FOR UPDATE
 	`, verificationID).Scan(&userID, &expiresAt, &verifiedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrInvalidToken
+		return false, ErrInvalidToken
 	}
 	if err != nil {
-		return fmt.Errorf("lock email verification: %w", err)
+		return false, fmt.Errorf("lock email verification: %w", err)
 	}
 	if verifiedAt != nil {
-		return ErrVerificationConsumed
+		return false, ErrVerificationConsumed
 	}
 	if !now.Before(expiresAt) {
-		return ErrVerificationExpired
+		return false, ErrVerificationExpired
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE users SET status = 'ACTIVE', updated_at = $2
 		WHERE id = $1 AND status = 'PENDING'
 	`, userID, now)
 	if err != nil {
-		return fmt.Errorf("activate verified user: %w", err)
+		return false, fmt.Errorf("activate verified user: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return ErrVerificationConsumed
+		return false, ErrVerificationConsumed
 	}
 	if _, err := tx.Exec(ctx, `UPDATE email_verifications SET verified_at = $2 WHERE id = $1`, verificationID, now); err != nil {
-		return fmt.Errorf("consume email verification: %w", err)
+		return false, fmt.Errorf("consume email verification: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO email_delivery_jobs (verification_id, job_type, available_at)
 		VALUES ($1, 'WELCOME', $2)
 	`, verificationID, now); err != nil {
-		return fmt.Errorf("queue welcome email: %w", err)
+		return false, fmt.Errorf("queue welcome email: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_events (actor_user_id, event_type, metadata)
 		VALUES ($1, 'EMAIL_VERIFIED', jsonb_build_object('verification_id', $2::text))
 	`, userID, verificationID); err != nil {
-		return fmt.Errorf("audit email verification: %w", err)
+		return false, fmt.Errorf("audit email verification: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO audit_events (actor_user_id, event_type, metadata)
 		VALUES ($1, 'WELCOME_EMAIL_QUEUED', jsonb_build_object('verification_id', $2::text))
 	`, userID, verificationID); err != nil {
-		return fmt.Errorf("audit welcome email queue: %w", err)
+		return false, fmt.Errorf("audit welcome email queue: %w", err)
+	}
+	// Reserve/link only after successful email verification. The identity and
+	// lifecycle transition commit atomically with activation and the welcome job.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO whatsapp_identities (user_id, provider, provider_user_id)
+		SELECT linked_user_id, provider, provider_user_id
+		FROM whatsapp_onboarding_sessions
+		WHERE linked_user_id = $1 AND status = 'EMAIL_VERIFICATION_PENDING'
+	`, userID); err != nil {
+		return false, fmt.Errorf("link verified WhatsApp identity: %w", err)
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE whatsapp_onboarding_sessions
+		SET status = 'FIRST_PRODUCT_PENDING', completed_at = $2, updated_at = $2
+		WHERE linked_user_id = $1 AND status = 'EMAIL_VERIFICATION_PENDING'
+	`, userID, now)
+	if err != nil {
+		return false, fmt.Errorf("complete verified WhatsApp onboarding: %w", err)
+	}
+	continued := tag.RowsAffected() > 0
+	if continued {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO audit_events (actor_user_id, business_id, event_type, metadata)
+			SELECT linked_user_id, linked_business_id, event_type,
+			       jsonb_build_object('onboarding_session_id', id::text)
+			FROM whatsapp_onboarding_sessions
+			CROSS JOIN (VALUES ('WHATSAPP_IDENTITY_LINKED'), ('WHATSAPP_ONBOARDING_COMPLETED')) AS events(event_type)
+			WHERE linked_user_id = $1 AND status = 'FIRST_PRODUCT_PENDING' AND completed_at = $2
+		`, userID, now); err != nil {
+			return false, fmt.Errorf("audit verified WhatsApp onboarding: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit email verification: %w", err)
+		return false, fmt.Errorf("commit email verification: %w", err)
 	}
-	return nil
+	return continued, nil
 }

@@ -200,7 +200,7 @@ func (s *Service) Validate(ctx context.Context, rawToken string) (Session, error
 	if err != nil {
 		return Session{}, err
 	}
-	if session.Status == StatusFirstProductPending {
+	if session.Status == StatusFirstProductPending || session.Status == StatusEmailVerificationPending {
 		return session, ErrSessionConsumed
 	}
 	if session.Status == StatusExpired ||

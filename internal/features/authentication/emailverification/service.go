@@ -3,6 +3,8 @@ package emailverification
 import (
 	"context"
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -12,11 +14,40 @@ type VerificationRepository interface {
 }
 
 type Service struct {
-	repository VerificationRepository
-	tokens     *TokenManager
-	now        func() time.Time
-	ttl        time.Duration
-	notifier   interface{ Notify() }
+	repository        VerificationRepository
+	tokens            *TokenManager
+	now               func() time.Time
+	ttl               time.Duration
+	notifier          interface{ Notify() }
+	whatsAppReturnURL string
+}
+
+type VerificationResult struct {
+	ContinueInWhatsApp bool
+	RedirectURL        string
+}
+
+// The destination comes from trusted server configuration, never the browser.
+func (s *Service) SetWhatsAppReturnURL(raw string) error {
+	if raw == "" || raw == "https://wa.me/" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "wa.me" || parsed.User != nil || parsed.Fragment != "" {
+		return errors.New("WHATSAPP_ONBOARDING_RETURN_URL must be an HTTPS wa.me link to the public WhatsApp number")
+	}
+	number := strings.TrimPrefix(parsed.Path, "/")
+	if len(number) < 7 || len(number) > 15 || number[0] == '0' {
+		return errors.New("WhatsApp return link requires an international phone number")
+	}
+	for _, digit := range number {
+		if digit < '0' || digit > '9' {
+			return errors.New("WhatsApp return link requires digits only")
+		}
+	}
+	parsed.RawQuery = url.Values{"text": {"Continue"}}.Encode()
+	s.whatsAppReturnURL = parsed.String()
+	return nil
 }
 
 func (s *Service) SetNotifier(notifier interface{ Notify() }) { s.notifier = notifier }
@@ -41,19 +72,32 @@ func (s *Service) Request(ctx context.Context, userID string) error {
 }
 
 func (s *Service) Verify(ctx context.Context, rawToken string) error {
+	_, err := s.VerifyWithResult(ctx, rawToken)
+	return err
+}
+
+func (s *Service) VerifyWithResult(ctx context.Context, rawToken string) (VerificationResult, error) {
 	claims, err := s.tokens.Verify(rawToken)
 	if err != nil {
-		return ErrInvalidToken
+		return VerificationResult{}, ErrInvalidToken
 	}
 	now := s.now().UTC()
 	if !now.Before(claims.ExpiresAt) {
-		return ErrVerificationExpired
+		return VerificationResult{}, ErrVerificationExpired
 	}
-	if err := s.repository.Verify(ctx, claims.VerificationID, now); err != nil {
-		return err
+	var continuation bool
+	if repository, ok := s.repository.(interface {
+		VerifyWithContinuation(context.Context, string, time.Time) (bool, error)
+	}); ok {
+		continuation, err = repository.VerifyWithContinuation(ctx, claims.VerificationID, now)
+	} else {
+		err = s.repository.Verify(ctx, claims.VerificationID, now)
+	}
+	if err != nil {
+		return VerificationResult{}, err
 	}
 	if s.notifier != nil {
 		s.notifier.Notify()
 	}
-	return nil
+	return VerificationResult{ContinueInWhatsApp: continuation, RedirectURL: s.whatsAppReturnURL}, nil
 }

@@ -10,9 +10,10 @@ import (
 const (
 	ProviderMetaWhatsApp = "META_WHATSAPP"
 
-	StatusRegistrationPending = "REGISTRATION_PENDING"
-	StatusFirstProductPending = "FIRST_PRODUCT_PENDING"
-	StatusExpired             = "EXPIRED"
+	StatusRegistrationPending      = "REGISTRATION_PENDING"
+	StatusEmailVerificationPending = "EMAIL_VERIFICATION_PENDING"
+	StatusFirstProductPending      = "FIRST_PRODUCT_PENDING"
+	StatusExpired                  = "EXPIRED"
 
 	CreateFirstProductAction = "CREATE_FIRST_PRODUCT"
 )

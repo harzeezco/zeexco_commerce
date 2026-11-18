@@ -4,6 +4,7 @@ type WhatsAppRegisterRequest struct {
 	FirstName       string `json:"first_name"`
 	LastName        string `json:"last_name"`
 	BusinessName    string `json:"business_name"`
-	Email           string `json:"email,omitempty"`
+	Email           string `json:"email"`
+	Password        string `json:"password"`
 	OnboardingToken string `json:"onboarding_token"`
 }

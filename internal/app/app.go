@@ -141,6 +141,10 @@ func New(ctx context.Context) (*App, error) {
 		pool.Close()
 		return nil, fmt.Errorf("initialize email verification: %w", err)
 	}
+	if err := emailService.SetWhatsAppReturnURL(cfg.WhatsAppOnboardingReturnURL); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("configure activation WhatsApp continuation: %w", err)
+	}
 	registrationRepository := authrepositories.NewRegistrationRepositoryWithVerificationTTL(pool, emailRuntime.ttl)
 	registerService, err := services.NewRegisterService(
 		registrationRepository,
@@ -250,7 +254,7 @@ func New(ctx context.Context) (*App, error) {
 				return nil, fmt.Errorf("initialize WhatsApp onboarding: %w", err)
 			}
 			whatsappIngestionService.SetIdentityOutcomeHandler(onboardingService)
-			onboardingController := whatsapponboarding.NewController(onboardingService)
+			onboardingController := whatsapponboarding.NewController(onboardingService, registerService)
 			pageLimiter := httpapi.NewLimiter(onboardingValidateLimit, rateLimitWindow)
 			mux.Handle(whatsapproutes.OnboardingPage, httpapi.RateLimit(
 				pageLimiter, "onboarding_validate", metrics, http.HandlerFunc(onboardingController.Page),

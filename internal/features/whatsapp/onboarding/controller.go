@@ -11,22 +11,29 @@ import (
 
 	authmodels "github.com/harzeezco/zeexco_commerce/internal/features/authentication/models"
 	authschemas "github.com/harzeezco/zeexco_commerce/internal/features/authentication/schemas"
+	authservices "github.com/harzeezco/zeexco_commerce/internal/features/authentication/services"
 )
 
 const maxOnboardingFormBytes int64 = 32 << 10
 
 type OnboardingService interface {
 	Validate(context.Context, string) (Session, error)
-	Complete(context.Context, string, RegisterCommand) (Completion, error)
 	RetryCompletion(context.Context, string)
 	ReturnURL() string
 }
 
 type Controller struct {
-	service OnboardingService
+	service   OnboardingService
+	registrar BrowserRegistrar
 }
 
-func NewController(service OnboardingService) *Controller { return &Controller{service: service} }
+type BrowserRegistrar interface {
+	Register(context.Context, authservices.RegisterCommand) (*authmodels.Registration, error)
+}
+
+func NewController(service OnboardingService, registrar BrowserRegistrar) *Controller {
+	return &Controller{service: service, registrar: registrar}
+}
 
 type validationResponse struct {
 	Valid     bool      `json:"valid"`
@@ -54,6 +61,8 @@ func (c *Controller) ValidateAPI(w http.ResponseWriter, r *http.Request) {
 	session, err := c.service.Validate(r.Context(), values[0])
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrSessionConsumed) && session.Status == StatusEmailVerificationPending:
+			writeAPIError(w, http.StatusConflict, "ONBOARDING_VERIFICATION_PENDING", "Registration received. Please check your email to activate your account.")
 		case errors.Is(err, ErrMalformedToken):
 			writeAPIError(w, http.StatusBadRequest, "ONBOARDING_TOKEN_INVALID", "This registration link is invalid.")
 		case errors.Is(err, ErrInvalidSession):
@@ -91,41 +100,36 @@ func (c *Controller) RegisterAPI(w http.ResponseWriter, r *http.Request) {
 		writeAPIFieldError(w, http.StatusBadRequest, "ONBOARDING_TOKEN_REQUIRED", "An onboarding token is required.", "onboarding_token")
 		return
 	}
-	completion, err := c.service.Complete(r.Context(), request.OnboardingToken, RegisterCommand{
+	_, err := c.registrar.Register(r.Context(), authservices.RegisterCommand{
 		FirstName: request.FirstName, LastName: request.LastName,
 		BusinessName: request.BusinessName, Email: request.Email,
+		Password: request.Password, OnboardingToken: request.OnboardingToken,
 	})
 	if err != nil {
 		c.writeRegistrationError(w, err)
 		return
 	}
-	registration := completion.Registration
-	writeAPIJSON(w, http.StatusCreated, authschemas.WhatsAppRegisterResponse{
-		User: authschemas.RegisteredUser{
-			ID: registration.User.ID, FirstName: registration.User.FirstName,
-			LastName: registration.User.LastName, Email: registration.User.Email,
-			Status: string(registration.User.Status),
-		},
-		Business: authschemas.RegisteredBusiness{
-			ID: registration.Business.ID, Name: registration.Business.Name,
-			Status: string(registration.Business.Status),
-		},
-		NextStep: "ADD_FIRST_PRODUCT",
+	writeAPIJSON(w, http.StatusAccepted, authschemas.RegisterResponse{
+		StatusCode: http.StatusAccepted,
+		Message:    "Registration successful. Please check your email to activate your account.",
 	})
 }
 
 func (c *Controller) writeRegistrationError(w http.ResponseWriter, err error) {
 	var validationError *ValidationError
+	var browserValidation *authservices.ValidationError
 	switch {
+	case errors.As(err, &browserValidation):
+		writeAPIFieldError(w, http.StatusBadRequest, "VALIDATION_ERROR", browserValidation.Message, browserValidation.Field)
 	case errors.As(err, &validationError):
 		writeAPIFieldError(w, http.StatusBadRequest, "VALIDATION_ERROR", validationError.Message, validationError.Field)
 	case errors.Is(err, authmodels.ErrEmailAlreadyRegistered):
 		writeAPIFieldError(w, http.StatusConflict, "EMAIL_ALREADY_REGISTERED", "An account with this email already exists.", "email")
-	case errors.Is(err, ErrMalformedToken), errors.Is(err, ErrInvalidSession):
+	case errors.Is(err, ErrMalformedToken), errors.Is(err, ErrInvalidSession), errors.Is(err, authmodels.ErrOnboardingInvalid):
 		writeAPIFieldError(w, http.StatusBadRequest, "ONBOARDING_TOKEN_INVALID", "This registration link is invalid.", "onboarding_token")
-	case errors.Is(err, ErrSessionExpired):
+	case errors.Is(err, ErrSessionExpired), errors.Is(err, authmodels.ErrOnboardingExpired):
 		writeAPIFieldError(w, http.StatusGone, "ONBOARDING_TOKEN_EXPIRED", "This registration link has expired.", "onboarding_token")
-	case errors.Is(err, ErrSessionConsumed):
+	case errors.Is(err, ErrSessionConsumed), errors.Is(err, authmodels.ErrOnboardingConsumed):
 		writeAPIFieldError(w, http.StatusConflict, "ONBOARDING_TOKEN_CONSUMED", "This registration link has already been used.", "onboarding_token")
 	case errors.Is(err, ErrIdentityConflict):
 		writeAPIFieldError(w, http.StatusConflict, "WHATSAPP_IDENTITY_CONFLICT", "This WhatsApp identity is already linked.", "onboarding_token")
@@ -167,8 +171,9 @@ func (c *Controller) Page(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := c.service.Validate(r.Context(), token)
 	if errors.Is(err, ErrSessionConsumed) {
-		if session.LinkedUserID != nil {
-			c.service.RetryCompletion(r.Context(), *session.LinkedUserID)
+		if session.Status == StatusEmailVerificationPending {
+			renderVerificationPending(w)
+			return
 		}
 		renderSuccess(w, c.service.ReturnURL())
 		return
@@ -192,13 +197,22 @@ func (c *Controller) Submit(w http.ResponseWriter, r *http.Request) {
 		LastName: r.PostForm.Get("last_name"), Email: r.PostForm.Get("email"),
 		BusinessName: r.PostForm.Get("business_name"),
 	}
-	_, err := c.service.Complete(r.Context(), data.Token, RegisterCommand{
+	if data.Token == "" {
+		renderExpired(w)
+		return
+	}
+	_, err := c.registrar.Register(r.Context(), authservices.RegisterCommand{
 		FirstName: data.FirstName, LastName: data.LastName, Email: data.Email,
 		BusinessName: data.BusinessName,
+		Password:     r.PostForm.Get("password"), OnboardingToken: data.Token,
 	})
 	if err != nil {
 		var validationError *ValidationError
+		var browserValidation *authservices.ValidationError
 		switch {
+		case errors.As(err, &browserValidation):
+			data.Error = browserValidation.Message
+			renderForm(w, http.StatusBadRequest, data)
 		case errors.As(err, &validationError):
 			data.Error = validationError.Message
 			renderForm(w, http.StatusBadRequest, data)
@@ -206,7 +220,8 @@ func (c *Controller) Submit(w http.ResponseWriter, r *http.Request) {
 			data.Error = "An account with this email already exists. For your security, sign in and use a future authenticated linking flow."
 			renderForm(w, http.StatusConflict, data)
 		case errors.Is(err, ErrMalformedToken), errors.Is(err, ErrInvalidSession),
-			errors.Is(err, ErrSessionExpired), errors.Is(err, ErrSessionConsumed):
+			errors.Is(err, ErrSessionExpired), errors.Is(err, ErrSessionConsumed),
+			errors.Is(err, authmodels.ErrOnboardingInvalid), errors.Is(err, authmodels.ErrOnboardingExpired), errors.Is(err, authmodels.ErrOnboardingConsumed):
 			renderExpired(w)
 		default:
 			data.Error = "Setup could not be completed. Please try again."
@@ -214,7 +229,12 @@ func (c *Controller) Submit(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	renderSuccess(w, c.service.ReturnURL())
+	renderVerificationPending(w)
+}
+
+func renderVerificationPending(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Check your email</title></head><body><main><h1>Check your email</h1><p>Confirm your email address to activate your account. After activation, select Continue in WhatsApp to return to your conversation.</p></main></body></html>`)
 }
 
 func singleToken(r *http.Request) (string, bool) {
@@ -255,12 +275,13 @@ func renderExpired(w http.ResponseWriter) {
 var registrationPage = template.Must(template.New("registration").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Get started with Zeexco</title><style>` + pageStyles + `</style></head>
-<body><main><h1>Set up your Zeexco account</h1><p>Enter your business details. Your WhatsApp identity is already securely connected to this setup link.</p>
+<body><main><h1>Set up your Zico account</h1><p>This setup link identifies your WhatsApp conversation. Enter your details and verify your email before continuing.</p>
 {{if .Error}}<div class="error" role="alert">{{.Error}}</div>{{end}}
 <form method="post" action="/get-started"><input type="hidden" name="token" value="{{.Token}}">
 <label>First name<input required maxlength="100" autocomplete="given-name" name="first_name" value="{{.FirstName}}"></label>
 <label>Last name<input required maxlength="100" autocomplete="family-name" name="last_name" value="{{.LastName}}"></label>
-<label>Email (optional)<input maxlength="255" type="email" autocomplete="email" name="email" value="{{.Email}}"></label>
+<label>Email<input required maxlength="255" type="email" autocomplete="email" name="email" value="{{.Email}}"></label>
+<label>Password<input required minlength="8" type="password" autocomplete="new-password" name="password"></label><p>Use at least 8 characters with a letter, number, and symbol.</p>
 <label>Business name<input required maxlength="200" autocomplete="organization" name="business_name" value="{{.BusinessName}}"></label>
 <button type="submit">Complete setup</button></form></main></body></html>`))
 

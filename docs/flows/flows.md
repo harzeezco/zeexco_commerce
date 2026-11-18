@@ -1205,13 +1205,21 @@ Those should not be added to MVP until the first commerce lifecycle is proven.
 The WhatsApp CTA opens `${PUBLIC_FRONTEND_BASE_URL}/register?token=<opaque>`.
 The frontend can validate the token with
 `GET /api/v1/whatsapp/onboarding/validate?token=<opaque>` and submits the same
-required token to `POST /api/v1/whatsapp/onboarding/register`. First name, last
-name, and business name are required; email is optional and password is not
-accepted. Validation is repeated during registration. Only the server-side
-onboarding session supplies the WhatsApp identity. User creation, OWNER
-membership, identity linking, token consumption, and audits commit in one
-PostgreSQL transaction. Web registration remains independently available at
-`POST /api/v1/auth/register` with required email and password credentials.
+required token as `onboarding_token` to `POST /api/v1/whatsapp/onboarding/register`
+or `POST /api/v1/auth/register`. First name, last name, business name, email, and
+password are required. Both browser paths use the canonical web registration
+service. Validation is repeated during registration; only the server-side
+onboarding session supplies the provider and WhatsApp identity. The transaction
+creates a PENDING user, business, OWNER membership, verification outbox job, and
+reserves the onboarding session as EMAIL_VERIFICATION_PENDING.
+
+Email activation atomically activates the user, links the WhatsApp identity,
+queues the welcome email, and transitions to FIRST_PRODUCT_PENDING. It returns
+CONTINUE_IN_WHATSAPP and the configured wa.me link with prefilled Continue text.
+The frontend displays a Continue in WhatsApp button; opening the link does not
+send the message. After the user sends it, the inbound worker sends the existing
+Create first product invitation. Normal web activation remains HTTP 204.
+See `whatsapp-browser-registration.md` for the API sequence and frontend contract.
 
 # WhatsApp-native merchant registration
 
